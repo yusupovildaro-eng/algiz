@@ -12,26 +12,56 @@
   button:active { opacity: 0.7; }
   .card { background: #0a84ff; color: white; }
   .editorial { background: #30d158; color: white; }
+  .reset { background: #e5e5ea; color: #636366; font-size: 14px; padding: 12px; }
   #status { font-size: 15px; color: #636366; min-height: 24px; text-align: center; }
+  #setup { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 320px; }
+  #setup input { padding: 14px; border: 1.5px solid #c7c7cc; border-radius: 12px; font-size: 15px; }
+  #setup button { background: #0a84ff; color: white; }
+  #main { display: none; flex-direction: column; align-items: center; gap: 16px; width: 100%; }
 </style>
 </head>
 <body>
 <h1>📡 Algiz Bot</h1>
 
-<button class="card" onclick="trigger('card')">📦 Карточка товара</button>
-<button class="editorial" onclick="trigger('editorial')">✍️ Редакционный пост</button>
+<div id="setup">
+  <p style="font-size:14px;color:#636366;text-align:center">Введи GitHub токен (один раз)</p>
+  <input id="tokenInput" type="password" placeholder="ghp_..." />
+  <button onclick="saveToken()">Сохранить</button>
+</div>
 
-<p id="status"></p>
+<div id="main">
+  <button class="card" onclick="trigger('card')">📦 Карточка товара</button>
+  <button class="editorial" onclick="trigger('editorial')">✍️ Редакционный пост</button>
+  <p id="status"></p>
+  <button class="reset" onclick="resetToken()">Сменить токен</button>
+</div>
 
 <script>
-const TOKEN = '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';
 const REPO = 'yusupovildaro-eng/algiz';
 
+function saveToken() {
+  const t = document.getElementById('tokenInput').value.trim();
+  if (!t.startsWith('ghp_')) { alert('Неверный токен'); return; }
+  localStorage.setItem('gh_token', t);
+  showMain();
+}
+
+function resetToken() {
+  localStorage.removeItem('gh_token');
+  document.getElementById('setup').style.display = 'flex';
+  document.getElementById('main').style.display = 'none';
+}
+
+function showMain() {
+  document.getElementById('setup').style.display = 'none';
+  document.getElementById('main').style.display = 'flex';
+}
+
 async function trigger(type) {
+  const TOKEN = localStorage.getItem('gh_token');
   const workflow = type === 'card' ? 'post_card.yml' : 'post_editorial.yml';
   const status = document.getElementById('status');
   status.textContent = '⏳ Запускаю...';
-
   try {
     const res = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/${workflow}/dispatches`, {
       method: 'POST',
@@ -42,16 +72,13 @@ async function trigger(type) {
       },
       body: JSON.stringify({ ref: 'main' })
     });
-
-    if (res.status === 204) {
-      status.textContent = '✅ Запущено! Пост появится через ~2 мин.';
-    } else {
-      status.textContent = `❌ Ошибка: ${res.status}`;
-    }
+    status.textContent = res.status === 204 ? '✅ Запущено! Пост выйдет через ~2 мин.' : `❌ Ошибка: ${res.status}`;
   } catch (e) {
     status.textContent = `❌ ${e.message}`;
   }
 }
+
+if (localStorage.getItem('gh_token')) showMain();
 </script>
 </body>
 </html>
