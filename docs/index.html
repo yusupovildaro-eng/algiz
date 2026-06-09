@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Algiz Bot</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #f2f2f7; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; }
+  h1 { font-size: 22px; font-weight: 700; color: #1c1c1e; }
+  button { width: 100%; max-width: 320px; padding: 18px; border: none; border-radius: 14px; font-size: 17px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  button:active { opacity: 0.7; }
+  .card { background: #0a84ff; color: white; }
+  .editorial { background: #30d158; color: white; }
+  #status { font-size: 15px; color: #636366; min-height: 24px; text-align: center; }
+</style>
+</head>
+<body>
+<h1>📡 Algiz Bot</h1>
+
+<button class="card" onclick="trigger('card')">📦 Карточка товара</button>
+<button class="editorial" onclick="trigger('editorial')">✍️ Редакционный пост</button>
+
+<p id="status"></p>
+
+<script>
+const TOKEN = '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';
+const REPO = 'yusupovildaro-eng/algiz';
+
+async function trigger(type) {
+  const workflow = type === 'card' ? 'post_card.yml' : 'post_editorial.yml';
+  const status = document.getElementById('status');
+  status.textContent = '⏳ Запускаю...';
+
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/${workflow}/dispatches`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ref: 'main' })
+    });
+
+    if (res.status === 204) {
+      status.textContent = '✅ Запущено! Пост появится через ~2 мин.';
+    } else {
+      status.textContent = `❌ Ошибка: ${res.status}`;
+    }
+  } catch (e) {
+    status.textContent = `❌ ${e.message}`;
+  }
+}
+</script>
+</body>
+</html>
