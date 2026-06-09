@@ -2,8 +2,8 @@ name: Post Product Card
 
 on:
   schedule:
-    - cron: '0 5 * * *'   # 10:00 Tashkent
-    - cron: '0 13 * * *'  # 18:00 Tashkent
+    - cron: '0 2 * * *'   # 07:00 Tashkent
+    - cron: '0 14 * * *'  # 19:00 Tashkent
   workflow_dispatch:
     inputs:
       source:

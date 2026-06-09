@@ -2,7 +2,7 @@ name: Post Editorial
 
 on:
   schedule:
-    - cron: '0 9 * * *'  # 14:00 Tashkent
+    - cron: '0 8 * * *'  # 13:00 Tashkent
   workflow_dispatch:
     inputs:
       post_type:
