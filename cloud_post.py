@@ -107,7 +107,8 @@ def cmd_card():
                 ok = post_product_card(p, force=False)
                 if ok:
                     name = p.get("name_ru") or p.get("name_en") or p.get("name_tr", "?")
-                    print(f"Posted: {name} (source={source})")
+                    safe = name.encode("ascii", errors="replace").decode("ascii")
+                    print(f"Posted: {safe} (source={source})")
                     posted_ids.add(p["id"])
                     state["posted_ids"] = list(posted_ids)
                     state["last_source"] = source

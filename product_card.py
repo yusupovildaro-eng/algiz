@@ -6,6 +6,7 @@ Supports two sources:
   - elina.ru (Russian) → Claude formats existing Russian text
 """
 
+import os
 import re
 import requests
 from claude_client import generate
@@ -23,6 +24,12 @@ COUNTRY = {
 
 # Telegram caption limit is 1024 chars
 CAPTION_LIMIT = 1024
+
+BRAND_NAME = {
+    "armas": "ARMAS ELEKTRONİK",
+    "elina": 'ПК "ЭЛИНА"',
+    "wlb":   "WARNING LIGHT BARS",
+}
 
 
 def _clean(text: str) -> str:
@@ -50,7 +57,17 @@ def _build_caption(name_ru: str, body: str, source: str = "") -> str:
     return header + body + footer
 
 
-def _generate_card_armas(product: dict) -> tuple[str, str]:
+def _parse_features(raw: str) -> list[str]:
+    """Extract ОСОБЕННОСТИ line → list of 3 short strings."""
+    for line in raw.splitlines():
+        if line.upper().startswith("ОСОБЕННОСТИ:"):
+            parts = line.split(":", 1)[1]
+            items = [p.strip() for p in parts.split("|") if p.strip()]
+            return (items + [""] * 3)[:3]
+    return ["", "", ""]
+
+
+def _generate_card_armas(product: dict) -> tuple[str, str, list[str]]:
     """Turkish source → translate + format."""
     features_block = "\n".join(f"- {f}" for f in product.get("features_tr", [])[:10])
     prompt = f"""Переведи и напиши карточку товара для Telegram-канала. Товар с турецкого сайта производителя.
@@ -63,16 +80,19 @@ def _generate_card_armas(product: dict) -> tuple[str, str]:
 Напиши в формате:
 НАЗВАНИЕ: <краткое коммерческое название на русском, 3-7 слов>
 ТЕКСТ: <2-3 живых предложения о товаре + 2-4 ключевых характеристики буллетами с ✅>
+ОСОБЕННОСТИ: <3 ключевых преимущества, разделённых |, каждое 2-4 слова>
 
 Требования:
 - всё на русском, конкретно, без воды
 - буллеты начинаются с ✅
 - НЕ упоминай цену вообще
 - весь текст не более 600 символов"""
-    return _parse_response(generate(prompt, max_tokens=450), product.get("name_tr", "Товар"))
+    raw = generate(prompt, max_tokens=500)
+    name, body = _parse_response(raw, product.get("name_tr", "Товар"))
+    return name, body, _parse_features(raw)
 
 
-def _generate_card_elina(product: dict) -> tuple[str, str]:
+def _generate_card_elina(product: dict) -> tuple[str, str, list[str]]:
     """Russian source → improve formatting."""
     specs_block = "\n".join(f"- {s}" for s in product.get("specs_ru", [])[:8])
     prompt = f"""Напиши карточку товара для Telegram-канала на основе данных с сайта производителя.
@@ -85,6 +105,7 @@ def _generate_card_elina(product: dict) -> tuple[str, str]:
 Напиши в формате:
 НАЗВАНИЕ: <название, 3-7 слов>
 ТЕКСТ: <2-3 живых предложения о товаре + 2-4 ключевых характеристики буллетами с ✅>
+ОСОБЕННОСТИ: <3 ключевых преимущества, разделённых |, каждое 2-4 слова>
 
 Требования:
 - конкретно, профессионально
@@ -92,10 +113,12 @@ def _generate_card_elina(product: dict) -> tuple[str, str]:
 - НЕ упоминай цену вообще
 - НЕ добавляй призывы к действию, ссылки на сайт, упоминания заказа или контактов — это добавляется автоматически
 - весь текст не более 600 символов"""
-    return _parse_response(generate(prompt, max_tokens=450), product.get("name_ru", "Товар"))
+    raw = generate(prompt, max_tokens=500)
+    name, body = _parse_response(raw, product.get("name_ru", "Товар"))
+    return name, body, _parse_features(raw)
 
 
-def _generate_card_wlb(product: dict) -> tuple[str, str]:
+def _generate_card_wlb(product: dict) -> tuple[str, str, list[str]]:
     """English source → translate + format."""
     specs_block = "\n".join(f"- {s}" for s in product.get("specs_en", [])[:10])
     prompt = f"""Переведи и напиши карточку товара для Telegram-канала. Товар с английского сайта производителя.
@@ -108,13 +131,16 @@ def _generate_card_wlb(product: dict) -> tuple[str, str]:
 Напиши в формате:
 НАЗВАНИЕ: <краткое коммерческое название на русском, 3-7 слов>
 ТЕКСТ: <2-3 живых предложения о товаре + 2-4 ключевых характеристики буллетами с ✅>
+ОСОБЕННОСТИ: <3 ключевых преимущества, разделённых |, каждое 2-4 слова>
 
 Требования:
 - всё на русском, конкретно, без воды
 - буллеты начинаются с ✅
 - НЕ упоминай цену вообще
 - весь текст не более 600 символов"""
-    return _parse_response(generate(prompt, max_tokens=450), product.get("name_en", "Товар"))
+    raw = generate(prompt, max_tokens=500)
+    name, body = _parse_response(raw, product.get("name_en", "Товар"))
+    return name, body, _parse_features(raw)
 
 
 def _parse_response(raw: str, fallback_name: str) -> tuple[str, str]:
@@ -137,11 +163,11 @@ def post_product_card(product: dict, force: bool = False) -> bool:
 
     source = product.get("source", "armas")
     if source == "elina":
-        name_ru, body = _generate_card_elina(product)
+        name_ru, body, features = _generate_card_elina(product)
     elif source == "wlb":
-        name_ru, body = _generate_card_wlb(product)
+        name_ru, body, features = _generate_card_wlb(product)
     else:
-        name_ru, body = _generate_card_armas(product)
+        name_ru, body, features = _generate_card_armas(product)
 
     caption = _build_caption(name_ru, body, source)
 
@@ -160,6 +186,7 @@ def post_product_card(product: dict, force: bool = False) -> bool:
             resp.raise_for_status()
             if len(resp.content) < 1000:
                 continue
+
             send_photo_bytes(resp.content, "photo", caption)
             posted = True
             break
