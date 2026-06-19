@@ -70,23 +70,25 @@ def _parse_features(raw: str) -> list[str]:
 def _generate_card_armas(product: dict) -> tuple[str, str, list[str]]:
     """Turkish source → translate + format."""
     features_block = "\n".join(f"- {f}" for f in product.get("features_tr", [])[:10])
-    prompt = f"""Tarjima qilib, Telegram kanal uchun mahsulot kartochkasini yoz. Mahsulot turk ishlab chiqaruvchisining saytidan.
+    prompt = f"""IMPORTANT: Write EVERYTHING in Uzbek language only. Do not use Russian or Turkish in your response.
 
-Turk nomi: {product.get('name_tr', '')}
-Tavsif (TR): {product.get('description_tr', '')[:500]}
-Xususiyatlari (TR):
+Translate this product info from Turkish and write a Telegram channel post in UZBEK.
+
+Product name (TR): {product.get('name_tr', '')}
+Description (TR): {product.get('description_tr', '')[:500]}
+Features (TR):
 {features_block}
 
-Quyidagi formatda yoz:
-NOMI: <o'zbek tilida qisqa tijorat nomi, 3-7 so'z>
-MATN: <mahsulot haqida 2-3 ta jonli jumla + ✅ belgili 2-4 ta asosiy xususiyat>
-XUSUSIYATLAR: <| bilan ajratilgan 3 ta asosiy afzallik, har biri 2-4 so'z>
+Write in this exact format:
+NOMI: <short commercial name in Uzbek, 3-7 words>
+MATN: <2-3 sentences about the product in Uzbek + 2-4 key features with ✅>
+XUSUSIYATLAR: <3 key advantages separated by |, each 2-4 words in Uzbek>
 
-Talablar:
-- hamma narsa o'zbek tilida, aniq, suvsiz
-- ✅ belgisi bilan boshlanadigan bandlar
-- narxni UMUMAN eslatma
-- butun matn 600 belgidan oshmasin"""
+Rules:
+- EVERYTHING must be in Uzbek language
+- bullet points start with ✅
+- do NOT mention price
+- max 600 characters total"""
     raw = generate(prompt, max_tokens=500)
     name, body = _parse_response(raw, product.get("name_tr", "Товар"))
     return name, body, _parse_features(raw)
@@ -95,24 +97,26 @@ Talablar:
 def _generate_card_elina(product: dict) -> tuple[str, str, list[str]]:
     """Russian source → improve formatting."""
     specs_block = "\n".join(f"- {s}" for s in product.get("specs_ru", [])[:8])
-    prompt = f"""Ishlab chiqaruvchi saytidagi ma'lumotlar asosida Telegram kanal uchun mahsulot kartochkasini yoz.
+    prompt = f"""IMPORTANT: Write EVERYTHING in Uzbek language only. Translate from Russian to Uzbek. Do not use Russian in your response.
 
-Nomi: {product.get('name_ru', '')}
-Tavsif: {product.get('description_ru', '')[:500]}
-Texnik xususiyatlar:
+Translate this product info from Russian and write a Telegram channel post in UZBEK.
+
+Product name (RU): {product.get('name_ru', '')}
+Description (RU): {product.get('description_ru', '')[:500]}
+Specs (RU):
 {specs_block}
 
-Quyidagi formatda yoz:
-NOMI: <o'zbek tilida nomi, 3-7 so'z>
-MATN: <mahsulot haqida 2-3 ta jonli jumla + ✅ belgili 2-4 ta asosiy xususiyat>
-XUSUSIYATLAR: <| bilan ajratilgan 3 ta asosiy afzallik, har biri 2-4 so'z>
+Write in this exact format:
+NOMI: <short name in Uzbek, 3-7 words>
+MATN: <2-3 sentences about the product in Uzbek + 2-4 key features with ✅>
+XUSUSIYATLAR: <3 key advantages separated by |, each 2-4 words in Uzbek>
 
-Talablar:
-- aniq, professional
-- ✅ belgisi bilan bandlar
-- narxni UMUMAN eslatma
-- harakatga chaqiruv, sayt havolasi, buyurtma yoki aloqa ma'lumotlarini QO'SHMA — ular avtomatik qo'shiladi
-- butun matn 600 belgidan oshmasin"""
+Rules:
+- EVERYTHING must be in Uzbek language — translate all Russian text
+- bullet points start with ✅
+- do NOT mention price
+- do NOT add calls to action or contact info — added automatically
+- max 600 characters total"""
     raw = generate(prompt, max_tokens=500)
     name, body = _parse_response(raw, product.get("name_ru", "Товар"))
     return name, body, _parse_features(raw)
@@ -121,23 +125,25 @@ Talablar:
 def _generate_card_wlb(product: dict) -> tuple[str, str, list[str]]:
     """English source → translate + format."""
     specs_block = "\n".join(f"- {s}" for s in product.get("specs_en", [])[:10])
-    prompt = f"""Tarjima qilib, Telegram kanal uchun mahsulot kartochkasini yoz. Mahsulot ingliz tilidagi ishlab chiqaruvchi saytidan.
+    prompt = f"""IMPORTANT: Write EVERYTHING in Uzbek language only. Translate from English to Uzbek. Do not use English in your response.
 
-Inglizcha nomi: {product.get('name_en', '')}
-Tavsif (EN): {product.get('description_en', '')[:500]}
-Xususiyatlari (EN):
+Translate this product info from English and write a Telegram channel post in UZBEK.
+
+Product name (EN): {product.get('name_en', '')}
+Description (EN): {product.get('description_en', '')[:500]}
+Features (EN):
 {specs_block}
 
-Quyidagi formatda yoz:
-NOMI: <o'zbek tilida qisqa tijorat nomi, 3-7 so'z>
-MATN: <mahsulot haqida 2-3 ta jonli jumla + ✅ belgili 2-4 ta asosiy xususiyat>
-XUSUSIYATLAR: <| bilan ajratilgan 3 ta asosiy afzallik, har biri 2-4 so'z>
+Write in this exact format:
+NOMI: <short commercial name in Uzbek, 3-7 words>
+MATN: <2-3 sentences about the product in Uzbek + 2-4 key features with ✅>
+XUSUSIYATLAR: <3 key advantages separated by |, each 2-4 words in Uzbek>
 
-Talablar:
-- hamma narsa o'zbek tilida, aniq, suvsiz
-- ✅ belgisi bilan boshlanadigan bandlar
-- narxni UMUMAN eslatma
-- butun matn 600 belgidan oshmasin"""
+Rules:
+- EVERYTHING must be in Uzbek language — translate all English text
+- bullet points start with ✅
+- do NOT mention price
+- max 600 characters total"""
     raw = generate(prompt, max_tokens=500)
     name, body = _parse_response(raw, product.get("name_en", "Товар"))
     return name, body, _parse_features(raw)
@@ -160,6 +166,13 @@ def _parse_response(raw: str, fallback_name: str) -> tuple[str, str]:
             body = parts.split("ТЕКСТ:", 1)[1].strip()
         else:
             name = parts.strip().split("\n")[0].strip()
+    # Strip XUSUSIYATLAR / ОСОБЕННОСТИ line from body
+    body_lines = [
+        l for l in body.splitlines()
+        if not l.upper().startswith("XUSUSIYATLAR:")
+        and not l.upper().startswith("ОСОБЕННОСТИ:")
+    ]
+    body = "\n".join(body_lines).strip()
     return _clean(name), _clean(body)
 
 
