@@ -17,9 +17,9 @@ SHOP_LINK = "https://algiz.uz/ru"
 MANAGER_LINK = "https://t.me/www_aloqa_uz"
 
 COUNTRY = {
-    "armas": "🇹🇷 Производство: Турция",
-    "elina": "🇷🇺 Производство: Россия",
-    "wlb":   "🇨🇳 Производство: КНР",
+    "armas": "🇹🇷 Ishlab chiqaruvchi: Turkiya",
+    "elina": "🇷🇺 Ishlab chiqaruvchi: Rossiya",
+    "wlb":   "🇨🇳 Ishlab chiqaruvchi: Xitoy",
 }
 
 # Telegram caption limit is 1024 chars
@@ -46,9 +46,9 @@ def _build_caption(name_ru: str, body: str, source: str = "") -> str:
     country = COUNTRY.get(source, "")
     footer = (
         (f"\n\n{country}" if country else "")
-        + "\n\n🚚 Доставляем по всему Узбекистану. Пишите в личку — ответим быстро!"
-        + f'\n\n💬 <a href="{MANAGER_LINK}">Связаться с менеджером</a>'
-        + f'\n🔗 <a href="{SHOP_LINK}">Подробнее / заказать</a>'
+        + "\n\n🚚 O'zbekiston bo'ylab yetkazib beramiz. Xabar yozing — tez javob beramiz!"
+        + f'\n\n💬 <a href="{MANAGER_LINK}">Menejer bilan bog\'lanish</a>'
+        + f'\n🔗 <a href="{SHOP_LINK}">Batafsil / buyurtma</a>'
     )
     header = f"<b>{name_ru}</b>\n\n"
     max_body = CAPTION_LIMIT - len(header) - len(footer) - 10
@@ -58,9 +58,9 @@ def _build_caption(name_ru: str, body: str, source: str = "") -> str:
 
 
 def _parse_features(raw: str) -> list[str]:
-    """Extract ОСОБЕННОСТИ line → list of 3 short strings."""
+    """Extract XUSUSIYATLAR line → list of 3 short strings."""
     for line in raw.splitlines():
-        if line.upper().startswith("ОСОБЕННОСТИ:"):
+        if line.upper().startswith("XUSUSIYATLAR:") or line.upper().startswith("ОСОБЕННОСТИ:"):
             parts = line.split(":", 1)[1]
             items = [p.strip() for p in parts.split("|") if p.strip()]
             return (items + [""] * 3)[:3]
@@ -70,23 +70,23 @@ def _parse_features(raw: str) -> list[str]:
 def _generate_card_armas(product: dict) -> tuple[str, str, list[str]]:
     """Turkish source → translate + format."""
     features_block = "\n".join(f"- {f}" for f in product.get("features_tr", [])[:10])
-    prompt = f"""Переведи и напиши карточку товара для Telegram-канала. Товар с турецкого сайта производителя.
+    prompt = f"""Tarjima qilib, Telegram kanal uchun mahsulot kartochkasini yoz. Mahsulot turk ishlab chiqaruvchisining saytidan.
 
-Турецкое название: {product.get('name_tr', '')}
-Описание (TR): {product.get('description_tr', '')[:500]}
-Характеристики (TR):
+Turk nomi: {product.get('name_tr', '')}
+Tavsif (TR): {product.get('description_tr', '')[:500]}
+Xususiyatlari (TR):
 {features_block}
 
-Напиши в формате:
-НАЗВАНИЕ: <краткое коммерческое название на русском, 3-7 слов>
-ТЕКСТ: <2-3 живых предложения о товаре + 2-4 ключевых характеристики буллетами с ✅>
-ОСОБЕННОСТИ: <3 ключевых преимущества, разделённых |, каждое 2-4 слова>
+Quyidagi formatda yoz:
+NOMI: <o'zbek tilida qisqa tijorat nomi, 3-7 so'z>
+MATN: <mahsulot haqida 2-3 ta jonli jumla + ✅ belgili 2-4 ta asosiy xususiyat>
+XUSUSIYATLAR: <| bilan ajratilgan 3 ta asosiy afzallik, har biri 2-4 so'z>
 
-Требования:
-- всё на русском, конкретно, без воды
-- буллеты начинаются с ✅
-- НЕ упоминай цену вообще
-- весь текст не более 600 символов"""
+Talablar:
+- hamma narsa o'zbek tilida, aniq, suvsiz
+- ✅ belgisi bilan boshlanadigan bandlar
+- narxni UMUMAN eslatma
+- butun matn 600 belgidan oshmasin"""
     raw = generate(prompt, max_tokens=500)
     name, body = _parse_response(raw, product.get("name_tr", "Товар"))
     return name, body, _parse_features(raw)
@@ -95,24 +95,24 @@ def _generate_card_armas(product: dict) -> tuple[str, str, list[str]]:
 def _generate_card_elina(product: dict) -> tuple[str, str, list[str]]:
     """Russian source → improve formatting."""
     specs_block = "\n".join(f"- {s}" for s in product.get("specs_ru", [])[:8])
-    prompt = f"""Напиши карточку товара для Telegram-канала на основе данных с сайта производителя.
+    prompt = f"""Ishlab chiqaruvchi saytidagi ma'lumotlar asosida Telegram kanal uchun mahsulot kartochkasini yoz.
 
-Название: {product.get('name_ru', '')}
-Описание: {product.get('description_ru', '')[:500]}
-Технические характеристики:
+Nomi: {product.get('name_ru', '')}
+Tavsif: {product.get('description_ru', '')[:500]}
+Texnik xususiyatlar:
 {specs_block}
 
-Напиши в формате:
-НАЗВАНИЕ: <название, 3-7 слов>
-ТЕКСТ: <2-3 живых предложения о товаре + 2-4 ключевых характеристики буллетами с ✅>
-ОСОБЕННОСТИ: <3 ключевых преимущества, разделённых |, каждое 2-4 слова>
+Quyidagi formatda yoz:
+NOMI: <o'zbek tilida nomi, 3-7 so'z>
+MATN: <mahsulot haqida 2-3 ta jonli jumla + ✅ belgili 2-4 ta asosiy xususiyat>
+XUSUSIYATLAR: <| bilan ajratilgan 3 ta asosiy afzallik, har biri 2-4 so'z>
 
-Требования:
-- конкретно, профессионально
-- буллеты с ✅
-- НЕ упоминай цену вообще
-- НЕ добавляй призывы к действию, ссылки на сайт, упоминания заказа или контактов — это добавляется автоматически
-- весь текст не более 600 символов"""
+Talablar:
+- aniq, professional
+- ✅ belgisi bilan bandlar
+- narxni UMUMAN eslatma
+- harakatga chaqiruv, sayt havolasi, buyurtma yoki aloqa ma'lumotlarini QO'SHMA — ular avtomatik qo'shiladi
+- butun matn 600 belgidan oshmasin"""
     raw = generate(prompt, max_tokens=500)
     name, body = _parse_response(raw, product.get("name_ru", "Товар"))
     return name, body, _parse_features(raw)
@@ -121,23 +121,23 @@ def _generate_card_elina(product: dict) -> tuple[str, str, list[str]]:
 def _generate_card_wlb(product: dict) -> tuple[str, str, list[str]]:
     """English source → translate + format."""
     specs_block = "\n".join(f"- {s}" for s in product.get("specs_en", [])[:10])
-    prompt = f"""Переведи и напиши карточку товара для Telegram-канала. Товар с английского сайта производителя.
+    prompt = f"""Tarjima qilib, Telegram kanal uchun mahsulot kartochkasini yoz. Mahsulot ingliz tilidagi ishlab chiqaruvchi saytidan.
 
-Английское название: {product.get('name_en', '')}
-Описание (EN): {product.get('description_en', '')[:500]}
-Характеристики (EN):
+Inglizcha nomi: {product.get('name_en', '')}
+Tavsif (EN): {product.get('description_en', '')[:500]}
+Xususiyatlari (EN):
 {specs_block}
 
-Напиши в формате:
-НАЗВАНИЕ: <краткое коммерческое название на русском, 3-7 слов>
-ТЕКСТ: <2-3 живых предложения о товаре + 2-4 ключевых характеристики буллетами с ✅>
-ОСОБЕННОСТИ: <3 ключевых преимущества, разделённых |, каждое 2-4 слова>
+Quyidagi formatda yoz:
+NOMI: <o'zbek tilida qisqa tijorat nomi, 3-7 so'z>
+MATN: <mahsulot haqida 2-3 ta jonli jumla + ✅ belgili 2-4 ta asosiy xususiyat>
+XUSUSIYATLAR: <| bilan ajratilgan 3 ta asosiy afzallik, har biri 2-4 so'z>
 
-Требования:
-- всё на русском, конкретно, без воды
-- буллеты начинаются с ✅
-- НЕ упоминай цену вообще
-- весь текст не более 600 символов"""
+Talablar:
+- hamma narsa o'zbek tilida, aniq, suvsiz
+- ✅ belgisi bilan boshlanadigan bandlar
+- narxni UMUMAN eslatma
+- butun matn 600 belgidan oshmasin"""
     raw = generate(prompt, max_tokens=500)
     name, body = _parse_response(raw, product.get("name_en", "Товар"))
     return name, body, _parse_features(raw)
@@ -146,7 +146,14 @@ def _generate_card_wlb(product: dict) -> tuple[str, str, list[str]]:
 def _parse_response(raw: str, fallback_name: str) -> tuple[str, str]:
     name = fallback_name
     body = raw
-    if "НАЗВАНИЕ:" in raw:
+    if "NOMI:" in raw:
+        parts = raw.split("NOMI:", 1)[1]
+        if "MATN:" in parts:
+            name = parts.split("MATN:", 1)[0].strip()
+            body = parts.split("MATN:", 1)[1].strip()
+        else:
+            name = parts.strip().split("\n")[0].strip()
+    elif "НАЗВАНИЕ:" in raw:
         parts = raw.split("НАЗВАНИЕ:", 1)[1]
         if "ТЕКСТ:" in parts:
             name = parts.split("ТЕКСТ:", 1)[0].strip()
