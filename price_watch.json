@@ -1,0 +1,54 @@
+{
+  "settings": {
+    "company": "Algiz (algiz.uz, aloqa.uz)",
+    "sells": "special-vehicle lights, light bars, sirens and loudspeaker units, breathalyzers",
+    "own_domains": ["algiz.uz", "aloqa.uz"],
+    "landed_cost_pct": null,
+    "target_offers": 8,
+    "max_searches": 6,
+    "max_fetches": 8,
+    "manual_rates": {}
+  },
+  "items": [
+    {
+      "id": "ermak",
+      "name": "СГУ «Ермак» (Элина)",
+      "query": "светосигнальная громкоговорящая установка СГУ Ермак Элина",
+      "analogs": "световая балка с громкоговорителем (СГУ) для спецтранспорта",
+      "our_price_uzs": null,
+      "supplier_price": 74580,
+      "supplier_currency": "RUB",
+      "supplier_note": "розничный прайс производителя на elina.ru"
+    },
+    {
+      "id": "smerch",
+      "name": "Громкоговорящая установка «Смерч» (Элина)",
+      "query": "громкоговорящая установка СГУ Смерч Элина",
+      "analogs": "сирена с громкоговорителем 100-200 Вт для спецтранспорта",
+      "our_price_uzs": null,
+      "supplier_price": 24090,
+      "supplier_currency": "RUB",
+      "supplier_note": "розничный прайс производителя на elina.ru"
+    },
+    {
+      "id": "tsefey",
+      "name": "Проблесковый маяк «Цефей» (Элина)",
+      "query": "проблесковый маяк Цефей Элина",
+      "analogs": "проблесковый маячок LED на магните 12/24 В",
+      "our_price_uzs": null,
+      "supplier_price": 8250,
+      "supplier_currency": "RUB",
+      "supplier_note": "розничный прайс производителя на elina.ru"
+    },
+    {
+      "id": "alcotester-pro",
+      "name": "Профессиональный алкотестер",
+      "query": "профессиональный алкотестер для медосмотра водителей",
+      "analogs": "профессиональный алкотестер с принтером или для предрейсового осмотра",
+      "our_price_uzs": null,
+      "supplier_price": null,
+      "supplier_currency": null,
+      "supplier_note": ""
+    }
+  ]
+}

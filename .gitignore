@@ -3,3 +3,4 @@ posted.db
 __pycache__/
 *.pyc
 logs/
+reports/

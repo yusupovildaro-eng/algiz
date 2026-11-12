@@ -37,11 +37,11 @@ def _pad_image(image_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-def send_text(text: str, parse_mode: str = "HTML") -> dict:
+def send_text(text: str, parse_mode: str = "HTML", chat_id: str | None = None) -> dict:
     r = requests.post(
         f"{API}/sendMessage",
         json={
-            "chat_id": CHANNEL_ID,
+            "chat_id": chat_id or CHANNEL_ID,
             "text": text,
             "parse_mode": parse_mode,
             "link_preview_options": {"is_disabled": True},
