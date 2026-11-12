@@ -1,3 +1,3 @@
 @echo off
 cd /d "C:\Users\yusup\tg-migalki-bot"
-python main.py prices >> logs\prices.log 2>&1
+claude -p "/prices" --permission-mode dontAsk --allowedTools "Bash(python main.py prices *),WebSearch,WebFetch,Edit(reports/**)" >> logs\prices.log 2>&1

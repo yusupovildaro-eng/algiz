@@ -1,291 +1,208 @@
 """
-Агент цен: ищет, почём конкуренты в Узбекистане продают наши товары,
-и присылает владельцу отчёт в личный Telegram (не в канал).
+Агент цен — работает по подписке Claude, без API-ключа Anthropic.
 
-Как работает:
-  1. Читает список товаров из price_watch.json.
-  2. Для каждого товара запускает отдельного исследователя (Claude + веб-поиск),
-     несколько товаров параллельно.
-  3. Исследователь сдаёт найденные предложения через инструмент submit_offers.
-  4. Python (не модель) переводит цены в сумы по курсу ЦБ РУз, считает
-     мин/медиану/макс, нашу позицию, маржу и изменение с прошлой проверки.
-  5. Отчёт уходит в ADMIN_CHAT_ID, копия сохраняется в reports/prices/,
-     история — в posted.db.
+Поиск делает Claude Code: скил /prices (.claude/skills/prices) запускает
+по одному субагенту на товар, каждый пишет найденные предложения в файл.
+Этот модуль делает всё остальное, без модели:
 
-Usage:
-  python main.py prices                  — все товары
-  python main.py prices ermak tsefey     — только эти id
-  python main.py prices --no-send        — не отправлять в Telegram
+  python main.py prices init [id ...]             папка проверки + брифы для субагентов
+  python main.py prices check <папка>             какие товары ещё не сданы
+  python main.py prices report <папка> [--no-send]   посчитать, сохранить, отправить отчёт
+
+Расчёты: цены переводятся в сумы по курсу ЦБ РУз; мин/медиана/макс,
+наша позиция, себестоимость и маржа (из sebestoimost.json, если товар там есть),
+изменение с прошлой проверки. Отчёт уходит в ADMIN_CHAT_ID — никогда в канал.
 """
 
+import argparse
 import html
 import json
 import os
 import statistics
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-import anthropic
 import requests
 from dotenv import load_dotenv
 
 import db
+import sebestoimost
+from rates import CURRENCIES, get_rates
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).parent
 WATCHLIST_PATH = BASE_DIR / "price_watch.json"
+COSTS_PATH = BASE_DIR / "sebestoimost.json"
 REPORT_DIR = BASE_DIR / "reports" / "prices"
 
-MODEL = os.environ.get("PRICE_AGENT_MODEL", "claude-opus-5-5")
-EFFORT = os.environ.get("PRICE_AGENT_EFFORT", "medium")
-MAX_WORKERS = int(os.environ.get("PRICE_AGENT_WORKERS", "3"))
-
-MAX_TURNS = 8          # запросов к API на один товар, с учётом продолжений
-MAX_NUDGES = 2         # сколько раз напомнить сдать результат
 TELEGRAM_LIMIT = 3900  # лимит Telegram 4096, оставляем запас
-
-CURRENCIES = ["UZS", "USD", "EUR", "RUB", "CNY", "TRY"]
-CBU_URL = "https://cbu.uz/ru/arkhiv-kursov-valyut/json/"
 TASHKENT = timezone(timedelta(hours=5))
 
-# Серверный запасной вариант при отказе модели (refusal) — для моделей, где он есть
-FALLBACK_MODELS = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"}
+BRIEF = """# Бриф исследователя цен: {name}
 
-# $ за 1 млн токенов: вход, выход, чтение кэша. Только для примерной оценки в отчёте.
-PRICING = {
-    "claude-opus-5-5": (4.00, 20.00, 0.20),
-    "claude-sonnet-5-5": (2.00, 10.00, 0.10),
-    "claude-haiku-5-5": (0.10, 0.50, 0.01),
-}
-WEB_SEARCH_USD = 0.01  # за один веб-поиск
+Ты исследуешь цены для {company} — магазина в Узбекистане, который продаёт {sells}.
+Задача: узнать, почём другие продавцы в Узбекистане сейчас продают ОДИН товар
+(и близкие аналоги), чтобы владелец сравнил их со своими ценами.
 
+## Товар
 
-# ── Инструменты исследователя ────────────────────────────────────────────────
+- Название: {name}
+- Что искать: {query}
+- Аналогами считать: {analogs}
 
-SUBMIT_TOOL = {
-    "name": "submit_offers",
-    "description": (
-        "Call this exactly once, when your research is finished, to hand in every "
-        "offer you found for the product. Submit an empty list if you found none. "
-        "Only include offers whose price you actually saw."
-    ),
-    "strict": True,
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "offers": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "seller": {"type": "string", "description": "Shop or seller name as shown on the page"},
-                        "title": {"type": "string", "description": "Product title as shown on the page"},
-                        "price": {"type": "number", "description": "Price for one unit, plain number without spaces"},
-                        "currency": {"type": "string", "enum": CURRENCIES},
-                        "url": {"type": "string", "description": "Page where you saw this price"},
-                        "match": {
-                            "type": "string",
-                            "enum": ["exact", "analog"],
-                            "description": "exact = the same model; analog = a comparable product of another brand or model",
-                        },
-                        "in_stock": {"type": "string", "enum": ["yes", "no", "unknown"]},
-                        "note": {
-                            "type": "string",
-                            "description": "Short note: wholesale, with VAT, used, price from search snippet, etc. Empty string if nothing",
-                        },
-                    },
-                    "required": ["seller", "title", "price", "currency", "url", "match", "in_stock", "note"],
-                    "additionalProperties": False,
-                },
-            },
-            "summary": {
-                "type": "string",
-                "description": "1-2 sentences in Russian: what the market for this product in Uzbekistan looks like",
-            },
-            "sources_checked": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Sites and searches you checked, including ones with no result",
-            },
-        },
-        "required": ["offers", "summary", "sources_checked"],
-        "additionalProperties": False,
-    },
-}
+## Как работать
 
-SYSTEM_PROMPT = """You are a price researcher for {company}, a shop in Uzbekistan that sells {sells}.
-Your job: find the prices other sellers in Uzbekistan currently ask for ONE product (and close analogs), so the owner can compare them with his own prices.
+- Ищи (WebSearch) так, как искал бы покупатель в Узбекистане: на русском и на узбекском
+  (латиница), с брендом и без. Например: «{query} цена Ташкент», «{query} купить Узбекистан»,
+  «{query} narxi».
+- Смотри маркетплейсы и объявления, которыми пользуются в Узбекистане (например olx.uz, uzum.uz),
+  и профильные магазины спецсигналов, сирен, алкотестеров.
+- Открывай страницы (WebFetch), чтобы увидеть настоящую цену. Цена только из сниппета поиска
+  допустима, если она видна явно, — тогда напиши в note «сниппет».
+- Только продавцы в Узбекистане или зарубежные магазины с явной доставкой в Узбекистан.
+- Ничего не выдумывай: ни продавца, ни цену, ни ссылку. Предложения без цены («договорная»,
+  «по запросу») пропускай. Ничего не нашёл — это нормальный результат.
+- Цена за 1 штуку. Валюта как на странице: «сум», «so'm» — это "UZS"; «у.е.» — это "USD".
+- match: "exact" — та же модель; "analog" — сопоставимый товар другого бренда или модели.
+  Явно другие товары (другой тип, запчасти, игрушки) пропускай.
+- Наши сайты не учитывай: {own_domains}.
+- Остановись, когда наберёшь около {target} подходящих предложений или новые поиски перестанут
+  давать новых продавцов. Не больше {max_searches} поисков и {max_fetches} открытых страниц.
 
-How to work:
-- Search the way a buyer in Uzbekistan would: in Russian and in Uzbek (Latin script), with and without the brand. For example "<product> цена Ташкент", "<product> купить Узбекистан", "<product> narxi".
-- Look at the marketplaces and classifieds people in Uzbekistan use (for example olx.uz and uzum.uz) and at specialist shops for special-vehicle lights, sirens and breathalyzers.
-- Open pages with web_fetch to read the actual price. A price seen only in a search snippet is acceptable when the snippet shows it clearly; then write "snippet" in note.
-- Only sellers in Uzbekistan, or foreign shops that clearly deliver to Uzbekistan.
-- Never invent a seller, a price or a link. Skip offers with no price ("договорная", "по запросу"). Finding nothing is a valid result.
-- One unit price per offer. Keep the currency shown on the page: "сум", "so'm" and "UZS" are UZS; "у.е." is USD.
-- match is "exact" only for the same model. A comparable product of another brand or model is "analog". Skip clearly different products (another product type, spare parts, toys).
-- Do not include our own sites: {own_domains}.
-- Stop when you have about {target} relevant offers or when new searches stop turning up new sellers. Then call submit_offers once."""
+## Результат
 
-USER_PROMPT = """Product: {name}
-What to search for: {query}
-Accept as analogs: {analogs}"""
+Запиши ОДИН файл:
 
-NUDGE = (
-    "You have not called submit_offers yet. Call it now with the offers you have "
-    "found so far (an empty list is fine)."
-)
+    {out_path}
+
+JSON такого вида:
+
+```json
+{{
+  "offers": [
+    {{
+      "seller": "Название магазина или продавца, как на странице",
+      "title": "Название товара, как на странице",
+      "price": 1250000,
+      "currency": "UZS",
+      "url": "https://страница-где-видна-цена",
+      "match": "exact",
+      "in_stock": "unknown",
+      "note": ""
+    }}
+  ],
+  "summary": "1–2 предложения по-русски: какие цены на этот товар в Узбекистане",
+  "sources_checked": ["olx.uz", "поиск: ..."]
+}}
+```
+
+- price — число без пробелов; currency — одно из: {currencies}.
+- match — "exact" или "analog"; in_stock — "yes", "no" или "unknown"; note — строка, можно пустую.
+- sources_checked — какие сайты и поиски проверил, включая те, где ничего не нашлось.
+
+Других файлов не создавай и не меняй. В конце ответь одной строкой: сколько предложений записано.
+"""
 
 
-def _server_tools(settings: dict) -> list:
-    search = {
-        "type": "web_search_20260209",
-        "name": "web_search",
-        "max_uses": int(settings.get("max_searches", 6)),
-        "user_location": {
-            "type": "approximate",
-            "city": "Tashkent",
-            "country": "UZ",
-            "timezone": "Asia/Tashkent",
-        },
-    }
-    own = settings.get("own_domains") or []
-    if own:
-        search["blocked_domains"] = own
-    fetch = {
-        "type": "web_fetch_20260209",
-        "name": "web_fetch",
-        "max_uses": int(settings.get("max_fetches", 8)),
-        "max_content_tokens": 20000,
-    }
-    return [search, fetch]
+# ── Подготовка проверки ──────────────────────────────────────────────────────
+
+def load_watchlist(path: Path = WATCHLIST_PATH) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
-# ── Один исследователь на один товар ─────────────────────────────────────────
+def init_run(item_ids: list | None = None, watchlist_path: Path = WATCHLIST_PATH,
+             report_root: Path = REPORT_DIR) -> Path | None:
+    watch = load_watchlist(watchlist_path)
+    settings = watch.get("settings", {})
+    items = watch.get("items", [])
+    if item_ids:
+        unknown = set(item_ids) - {it["id"] for it in items}
+        if unknown:
+            print(f"Нет в price_watch.json: {', '.join(sorted(unknown))}")
+        items = [it for it in items if it["id"] in item_ids]
+    if not items:
+        print("Нечего проверять.")
+        return None
 
-def _add_usage(total: dict, usage) -> None:
-    if usage is None:
-        return
-    total["input"] += getattr(usage, "input_tokens", 0) or 0
-    total["output"] += getattr(usage, "output_tokens", 0) or 0
-    total["cache_write"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
-    total["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
-    server = getattr(usage, "server_tool_use", None)
-    if server is not None:
-        total["searches"] += getattr(server, "web_search_requests", 0) or 0
+    run_dir = (report_root / f"{datetime.now(TASHKENT):%Y-%m-%d_%H%M%S}").resolve()
+    (run_dir / "briefs").mkdir(parents=True)
+    (run_dir / "offers").mkdir()
+    (run_dir / "run.json").write_text(json.dumps(
+        {"created": datetime.now(TASHKENT).isoformat(timespec="seconds"),
+         "items": [it["id"] for it in items], "reported_at": None},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"Папка проверки: {run_dir}")
+    print("Брифы — по одному субагенту на каждый:")
+    for it in items:
+        brief = BRIEF.format(
+            name=it["name"],
+            query=it.get("query") or it["name"],
+            analogs=it.get("analogs") or "сопоставимые товары других брендов",
+            company=settings.get("company", "наш магазин"),
+            sells=settings.get("sells", "оборудование для спецтранспорта"),
+            own_domains=", ".join(settings.get("own_domains") or []) or "—",
+            target=settings.get("target_offers", 8),
+            max_searches=settings.get("max_searches", 6),
+            max_fetches=settings.get("max_fetches", 8),
+            out_path=run_dir / "offers" / f"{it['id']}.json",
+            currencies=", ".join(CURRENCIES),
+        )
+        path = run_dir / "briefs" / f"{it['id']}.md"
+        path.write_text(brief, encoding="utf-8")
+        print(f"  {it['id']}: {path}")
+    print(f'Когда все сдадут: python main.py prices check "{run_dir}", '
+          f'затем python main.py prices report "{run_dir}"')
+    return run_dir
 
 
-def research_item(client, item: dict, settings: dict) -> dict:
-    """Run one researcher for one product. Never raises: errors go into result["error"]."""
-    usage = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "searches": 0}
-    result = {"id": item["id"], "offers": [], "summary": "", "sources_checked": [], "usage": usage, "error": None}
+# ── Приём результатов ────────────────────────────────────────────────────────
 
-    system = SYSTEM_PROMPT.format(
-        company=settings.get("company", "our shop"),
-        sells=settings.get("sells", "special-vehicle equipment"),
-        own_domains=", ".join(settings.get("own_domains") or []) or "none",
-        target=settings.get("target_offers", 8),
-    )
-    messages = [{
-        "role": "user",
-        "content": USER_PROMPT.format(
-            name=item["name"],
-            query=item.get("query") or item["name"],
-            analogs=item.get("analogs") or "comparable products of other brands",
-        ),
-    }]
-    tools = _server_tools(settings) + [SUBMIT_TOOL]
-
-    extra = {}
-    if MODEL in FALLBACK_MODELS:
-        extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
-
-    nudges = 0
+def read_offers(path: Path) -> tuple[dict | None, str | None]:
+    """Файл исследователя → (данные, ошибка). Битые отдельные предложения отсеет clean_offers."""
+    if not path.exists():
+        return None, "исследователь не сдал результат"
     try:
-        for _ in range(MAX_TURNS):
-            response = client.beta.messages.create(
-                model=MODEL,
-                max_tokens=16000,
-                system=system,
-                tools=tools,
-                messages=messages,
-                output_config={"effort": EFFORT},
-                cache_control={"type": "ephemeral"},
-                **extra,
-            )
-            _add_usage(usage, response.usage)
-
-            if response.stop_reason == "refusal":
-                result["error"] = "модель отказалась выполнять запрос"
-                return result
-            if response.stop_reason == "max_tokens":
-                result["error"] = "ответ модели обрезан по лимиту токенов"
-                return result
-
-            submit = next(
-                (b for b in response.content if b.type == "tool_use" and b.name == "submit_offers"),
-                None,
-            )
-            if submit is not None:
-                data = submit.input if isinstance(submit.input, dict) else json.loads(submit.input)
-                result["offers"] = data.get("offers") or []
-                result["summary"] = data.get("summary") or ""
-                result["sources_checked"] = data.get("sources_checked") or []
-                return result
-
-            messages.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason == "pause_turn":
-                continue  # серверный поиск не закончил — просто продолжаем
-
-            other_tools = [b for b in response.content if b.type == "tool_use"]
-            if other_tools:
-                messages.append({"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": b.id, "is_error": True,
-                     "content": f"Unknown tool {b.name}. Use web_search, web_fetch and submit_offers."}
-                    for b in other_tools
-                ]})
-                continue
-
-            if nudges >= MAX_NUDGES:
-                break
-            nudges += 1
-            messages.append({"role": "user", "content": NUDGE})
-
-        result["error"] = "исследователь не сдал результат"
-    except anthropic.APIStatusError as e:
-        result["error"] = f"ошибка API {e.status_code}: {e.message}"
-    except anthropic.APIConnectionError as e:
-        result["error"] = f"нет связи с API: {e}"
-    return result
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return None, f"файл с ошибкой JSON: {e}"
+    if not isinstance(data, dict) or not isinstance(data.get("offers"), list):
+        return None, "в файле нет списка offers"
+    return {
+        "offers": [o for o in data["offers"] if isinstance(o, dict)],
+        "summary": str(data.get("summary") or ""),
+        "sources_checked": [str(x) for x in data.get("sources_checked") or []],
+    }, None
 
 
-# ── Курсы и расчёты (без модели) ─────────────────────────────────────────────
+def _load_run(run_dir: Path) -> dict:
+    path = Path(run_dir) / "run.json"
+    if not path.exists():
+        raise SystemExit(f"Нет {path} — это не папка проверки (сначала: python main.py prices init)")
+    return json.loads(path.read_text(encoding="utf-8"))
 
-def get_rates(manual_rates: dict | None = None) -> tuple[dict, str]:
-    """Курсы ЦБ РУз: сколько сумов за 1 единицу валюты. Возвращает (курсы, подпись)."""
-    rates = {"UZS": 1.0}
-    label = "курс ЦБ РУз недоступен"
-    try:
-        r = requests.get(CBU_URL, timeout=15)
-        r.raise_for_status()
-        for row in r.json():
-            ccy = row.get("Ccy")
-            if ccy in CURRENCIES:
-                rates[ccy] = float(row["Rate"]) / float(row.get("Nominal") or 1)
-                label = f"курс ЦБ РУз на {row.get('Date', '?')}"
-    except (requests.RequestException, ValueError, KeyError) as e:
-        print(f"[prices] курсы ЦБ не получены: {e}")
-    for ccy, value in (manual_rates or {}).items():
-        if ccy.upper() not in rates:
-            rates[ccy.upper()] = float(value)
-            label += f", {ccy.upper()} — из настроек"
-    return rates, label
 
+def check_run(run_dir: Path) -> list[tuple[str, str]]:
+    run_dir = Path(run_dir)
+    problems = []
+    for item_id in _load_run(run_dir)["items"]:
+        _, err = read_offers(run_dir / "offers" / f"{item_id}.json")
+        if err:
+            problems.append((item_id, err))
+    if problems:
+        print("Не сданы или с ошибкой — запустите для них субагентов ещё раз:")
+        for item_id, err in problems:
+            print(f"  {item_id}: {err} — бриф {run_dir / 'briefs' / f'{item_id}.md'}")
+    else:
+        print("Все товары сданы.")
+    return problems
+
+
+# ── Расчёты (без модели) ─────────────────────────────────────────────────────
 
 def _is_own(host: str, own_domains: list) -> bool:
     return any(host == d or host.endswith("." + d) for d in own_domains)
@@ -321,18 +238,42 @@ def clean_offers(raw: list, rates: dict, own_domains: list) -> list:
             "price_uzs": price * rate if rate else None,
             "url": url,
             "match": offer.get("match") if offer.get("match") in ("exact", "analog") else "analog",
-            "in_stock": offer.get("in_stock") or "unknown",
+            "in_stock": offer.get("in_stock") if offer.get("in_stock") in ("yes", "no") else "unknown",
             "note": str(offer.get("note") or ""),
         })
     return cleaned
 
 
-def summarize(item: dict, offers: list, rates: dict, settings: dict) -> dict:
-    """Все цифры отчёта считаются здесь, из найденных цен и price_watch.json."""
+def load_costs(rates: dict, prices: dict, path: Path = COSTS_PATH) -> dict:
+    """Себестоимость из sebestoimost.json для товаров с тем же id: {id: {cost, margin_pct, sale_price}}."""
+    if not path.exists():
+        return {}
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        settings = spec.get("settings") or {}
+    except (json.JSONDecodeError, AttributeError) as e:
+        print(f"[prices] sebestoimost.json не прочитан: {e}")
+        return {}
+    costs = {}
+    for p in spec.get("products") or []:
+        pid = p.get("id")
+        if pid not in prices:
+            continue
+        price = prices[pid] or p.get("sale_price_uzs")
+        try:
+            a = sebestoimost.analyse_product(p, settings, rates, price=price or None)
+        except (sebestoimost.NumbersError, KeyError, TypeError, ValueError) as e:
+            print(f"[prices] себестоимость '{pid}' не посчитана: {e}")
+            continue
+        costs[pid] = {"cost": a["cost"]["total"], "margin_pct": a["margin_pct"], "sale_price": price}
+    return costs
+
+
+def summarize(item: dict, offers: list, rates: dict, settings: dict, cost_info: dict | None = None) -> dict:
+    """Все цифры отчёта считаются здесь, из найденных цен, price_watch.json и sebestoimost.json."""
     priced = [o for o in offers if o["price_uzs"] is not None]
     exact = [o for o in priced if o["match"] == "exact"]
-    basis_offers = exact or priced
-    prices = sorted(o["price_uzs"] for o in basis_offers)
+    prices = sorted(o["price_uzs"] for o in (exact or priced))
 
     s = {
         "count": len(prices),
@@ -340,33 +281,40 @@ def summarize(item: dict, offers: list, rates: dict, settings: dict) -> dict:
         "min": prices[0] if prices else None,
         "median": statistics.median(prices) if prices else None,
         "max": prices[-1] if prices else None,
-        "our_price": item.get("our_price_uzs"),
+        "our_price": item.get("our_price_uzs") or (cost_info or {}).get("sale_price"),
         "our_vs_median_pct": None,
         "change_pct": None,
-        "cost_uzs": None,
-        "landed_uzs": None,
+        "cost_uzs": None,        # закупка по курсу (если нет sebestoimost.json)
+        "landed_uzs": None,      # полная себестоимость
+        "cost_source": None,     # "sebestoimost" | "pct" | "purchase"
         "margin_pct": None,
         "market_vs_cost": None,
         "cheapest": sorted(priced, key=lambda o: o["price_uzs"])[:3],
         "unconverted": [o for o in offers if o["price_uzs"] is None],
     }
-    median = s["median"]
-    our = s["our_price"]
+    median, our = s["median"], s["our_price"]
     if our and median:
         s["our_vs_median_pct"] = (our / median - 1) * 100
 
-    supplier_price = item.get("supplier_price")
-    rate = rates.get(str(item.get("supplier_currency") or "").upper())
-    if supplier_price and rate:
-        s["cost_uzs"] = supplier_price * rate
-        pct = settings.get("landed_cost_pct")
-        if pct is not None:
-            s["landed_uzs"] = s["cost_uzs"] * (1 + float(pct) / 100)
-        cost_for_margin = s["landed_uzs"] or s["cost_uzs"]
-        if our:
-            s["margin_pct"] = (our - cost_for_margin) / our * 100
-        if median:
-            s["market_vs_cost"] = median / s["cost_uzs"]
+    if cost_info:
+        s["landed_uzs"], s["cost_source"] = cost_info["cost"], "sebestoimost"
+        s["margin_pct"] = cost_info["margin_pct"]
+    else:
+        supplier_price = item.get("supplier_price")
+        rate = rates.get(str(item.get("supplier_currency") or "").upper())
+        if supplier_price and rate:
+            s["cost_uzs"] = supplier_price * rate
+            pct = settings.get("landed_cost_pct")
+            if pct is not None:
+                s["landed_uzs"], s["cost_source"] = s["cost_uzs"] * (1 + float(pct) / 100), "pct"
+            else:
+                s["cost_source"] = "purchase"
+            if our:
+                s["margin_pct"] = (our - (s["landed_uzs"] or s["cost_uzs"])) / our * 100
+
+    base_cost = s["landed_uzs"] or s["cost_uzs"]
+    if base_cost and median:
+        s["market_vs_cost"] = median / base_cost
     return s
 
 
@@ -376,23 +324,14 @@ def apply_change(s: dict, prev_median: float | None) -> None:
         s["change_pct"] = (s["median"] / prev_median - 1) * 100
 
 
-def estimate_cost(usage: dict) -> float:
-    price_in, price_out, price_cache = PRICING.get(MODEL, PRICING["claude-opus-5-5"])
-    return (
-        (usage["input"] + usage["cache_write"] * 1.25) * price_in
-        + usage["cache_read"] * price_cache
-        + usage["output"] * price_out
-    ) / 1_000_000 + usage["searches"] * WEB_SEARCH_USD
-
-
 # ── Отчёт ────────────────────────────────────────────────────────────────────
 
 def _sum(value: float) -> str:
-    return f"{round(value):,}".replace(",", " ") + " сум"
+    return ("−" if value < 0 else "") + f"{abs(round(value)):,}".replace(",", " ") + " сум"
 
 
 def _pct(value: float) -> str:
-    return f"{value:+.0f}%"
+    return ("+" if value >= 0 else "−") + f"{abs(value):.0f}%"
 
 
 def _esc(text: str) -> str:
@@ -427,24 +366,27 @@ def format_item(n: int, item: dict, res: dict, s: dict, settings: dict) -> str:
                 line += f" — на {abs(d):.0f}% {'выше' if d > 0 else 'ниже'} медианы"
         lines.append(line)
     else:
-        lines.append("Наша цена: не указана в price_watch.json")
+        lines.append("Наша цена: не указана (price_watch.json или sebestoimost.json)")
 
-    if s["cost_uzs"]:
-        sp = item["supplier_price"]
-        line = (f"Закупка: {sp:,.0f} {item['supplier_currency'].upper()}".replace(",", " ")
+    if s["cost_source"] == "sebestoimost":
+        lines.append(f"Себестоимость (sebestoimost.json): {_sum(s['landed_uzs'])}")
+    elif s["cost_uzs"]:
+        line = (f"Закупка: {item['supplier_price']:,.0f} {item['supplier_currency'].upper()}".replace(",", " ")
                 + f" ≈ {_sum(s['cost_uzs'])} по курсу ЦБ")
-        if s["landed_uzs"]:
+        if s["cost_source"] == "pct":
             line += f", с надбавкой {settings['landed_cost_pct']}% ≈ {_sum(s['landed_uzs'])}"
         else:
-            line += " (без доставки и таможни)"
+            line += " (без доставки, пошлины и налогов)"
         lines.append(line)
-        if s["margin_pct"] is not None:
-            lines.append(f"Маржа при нашей цене: {s['margin_pct']:.0f}%")
-        ratio = s["market_vs_cost"]
-        if ratio and ratio >= 1:
-            lines.append(f"Медиана рынка выше закупки в {ratio:.2f} раза".replace(".", ","))
-        elif ratio:
-            lines.append(f"⚠️ Медиана рынка ниже закупки на {(1 - ratio) * 100:.0f}%")
+    if s["margin_pct"] is not None:
+        tail = " (с налогами)" if s["cost_source"] == "sebestoimost" else ""
+        lines.append(f"Маржа при нашей цене: {_pct(s['margin_pct']).lstrip('+')}{tail}")
+    ratio = s["market_vs_cost"]
+    what = "себестоимости" if s["cost_source"] in ("sebestoimost", "pct") else "закупки"
+    if ratio and ratio >= 1:
+        lines.append(f"Медиана рынка выше {what} в {ratio:.2f} раза".replace(".", ","))
+    elif ratio:
+        lines.append(f"⚠️ Медиана рынка ниже {what} на {(1 - ratio) * 100:.0f}%")
 
     if s["cheapest"]:
         lines.append("Дешевле всего:")
@@ -466,13 +408,10 @@ def format_item(n: int, item: dict, res: dict, s: dict, settings: dict) -> str:
     return "\n".join(lines)
 
 
-def build_report(rows: list, rates_label: str, total_usage: dict, when: datetime, settings: dict) -> list[str]:
+def build_report(rows: list, rates_label: str, when: datetime, settings: dict) -> list[str]:
     """Возвращает отчёт, уже разбитый на сообщения Telegram."""
     header = f"📊 <b>Цены конкурентов — {when:%d.%m.%Y}</b>\n{_esc(rates_label)}"
-    footer = (
-        f"Расход: ≈ ${estimate_cost(total_usage):.2f} · поисков: {total_usage['searches']} · модель {MODEL}\n"
-        "Цены собраны агентом с сайтов. Перед решением проверьте по ссылкам."
-    )
+    footer = "Собрано Claude Code по подписке. Цены взяты с сайтов — перед решением проверьте по ссылкам."
     blocks = [format_item(i, item, res, s, settings) for i, (item, res, s) in enumerate(rows, 1)]
 
     messages, current = [], header
@@ -499,77 +438,80 @@ def send_report(messages: list[str]) -> bool:
         for text in messages:
             send_text(text, chat_id=chat_id)
     except requests.RequestException as e:
-        print(f"[prices] Telegram не принял отчёт: {e}. Копия в reports/prices/.")
+        print(f"[prices] Telegram не принял отчёт: {e}. Копия сохранена в папке проверки.")
         return False
+    print("[prices] отчёт отправлен в Telegram.")
     return True
 
 
-# ── Запуск ───────────────────────────────────────────────────────────────────
+def finish_run(run_dir: Path, send: bool = True, watchlist_path: Path = WATCHLIST_PATH,
+               costs_path: Path = COSTS_PATH) -> list[str]:
+    run_dir = Path(run_dir)
+    run = _load_run(run_dir)
+    watch = load_watchlist(watchlist_path)
+    settings = watch.get("settings", {})
+    by_id = {it["id"]: it for it in watch.get("items", [])}
+    items = [by_id[i] for i in run["items"] if i in by_id]
+    already = bool(run.get("reported_at"))
 
-def load_watchlist(path: Path = WATCHLIST_PATH) -> dict:
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    db.init_db()
+    rates, rates_label = get_rates(settings.get("manual_rates"))
+    costs = load_costs(rates, {it["id"]: it.get("our_price_uzs") for it in items}, costs_path)
+    own = [d.lower() for d in settings.get("own_domains") or []]
+
+    rows, saved = [], []
+    for item in items:
+        data, err = read_offers(run_dir / "offers" / f"{item['id']}.json")
+        res = {"error": err, "summary": (data or {}).get("summary", ""),
+               "sources_checked": (data or {}).get("sources_checked", [])}
+        offers = clean_offers((data or {}).get("offers"), rates, own)
+        s = summarize(item, offers, rates, settings, costs.get(item["id"]))
+        if not already:
+            apply_change(s, db.last_price_median(item["id"], s["basis"]))
+            if not err:
+                db.save_price_run(item["id"], s, offers)
+        rows.append((item, res, s))
+        saved.append({"item": item, **res, "offers": offers,
+                      "stats": {k: v for k, v in s.items() if k not in ("cheapest", "unconverted")}})
+
+    now = datetime.now(TASHKENT)
+    messages = build_report(rows, rates_label, now, settings)
+    (run_dir / "result.json").write_text(json.dumps({"rates": rates, "items": saved},
+                                                    ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "report.txt").write_text("\n\n".join(messages), encoding="utf-8")
+    run["reported_at"] = now.isoformat(timespec="seconds")
+    (run_dir / "run.json").write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\n\n".join(messages))
+    print(f"\n[prices] отчёт: {run_dir / 'report.txt'}")
+    if already:
+        print("[prices] отчёт по этой папке уже делался — история цен не обновлялась.")
+    if send:
+        send_report(messages)
+    return messages
 
 
-def run(item_ids: list | None = None, send: bool = True, client=None,
-        watchlist_path: Path = WATCHLIST_PATH, report_dir: Path = REPORT_DIR) -> list[str]:
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+def cli(argv: list[str]) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
+    ap = argparse.ArgumentParser(prog="python main.py prices", description="Агент цен (по подписке Claude)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p_init = sub.add_parser("init", help="создать папку проверки и брифы")
+    p_init.add_argument("ids", nargs="*", help="id товаров из price_watch.json (по умолчанию все)")
+    p_check = sub.add_parser("check", help="какие товары ещё не сданы")
+    p_check.add_argument("run_dir")
+    p_report = sub.add_parser("report", help="посчитать и отправить отчёт")
+    p_report.add_argument("run_dir")
+    p_report.add_argument("--no-send", action="store_true", help="не отправлять в Telegram")
+    args = ap.parse_args(argv)
 
-    watch = load_watchlist(watchlist_path)
-    settings = watch.get("settings", {})
-    items = watch.get("items", [])
-    if item_ids:
-        unknown = set(item_ids) - {it["id"] for it in items}
-        if unknown:
-            print(f"[prices] нет в price_watch.json: {', '.join(sorted(unknown))}")
-        items = [it for it in items if it["id"] in item_ids]
-    if not items:
-        print("[prices] нечего проверять.")
-        return []
-
-    if client is None and not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        print("[prices] Не найден ANTHROPIC_API_KEY. Добавьте ключ в .env и запустите снова.")
-        return []
-
-    db.init_db()
-    rates, rates_label = get_rates(settings.get("manual_rates"))
-    client = client or anthropic.Anthropic(max_retries=4)
-
-    print(f"[prices] товаров: {len(items)}, модель {MODEL}, параллельно {MAX_WORKERS}")
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        results = list(pool.map(lambda it: research_item(client, it, settings), items))
-
-    own = [d.lower() for d in settings.get("own_domains") or []]
-    total = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "searches": 0}
-    rows, saved = [], []
-    for item, res in zip(items, results):
-        for k in total:
-            total[k] += res["usage"][k]
-        offers = clean_offers(res["offers"], rates, own)
-        s = summarize(item, offers, rates, settings)
-        apply_change(s, db.last_price_median(item["id"], s["basis"]))
-        if not res["error"]:
-            db.save_price_run(item["id"], s, offers)
-        rows.append((item, res, s))
-        saved.append({"item": item, "error": res["error"], "summary": res["summary"],
-                      "sources_checked": res["sources_checked"], "offers": offers,
-                      "stats": {k: v for k, v in s.items() if k not in ("cheapest", "unconverted")}})
-        print(f"[prices] {item['id']}: {s['count']} предл." + (f", ошибка: {res['error']}" if res["error"] else ""))
-
-    now = datetime.now(TASHKENT)
-    messages = build_report(rows, rates_label, total, now, settings)
-
-    report_dir.mkdir(parents=True, exist_ok=True)
-    stamp = f"{now:%Y-%m-%d_%H%M%S}"
-    (report_dir / f"{stamp}.json").write_text(
-        json.dumps({"model": MODEL, "rates": rates, "usage": total, "items": saved},
-                   ensure_ascii=False, indent=2), encoding="utf-8")
-    (report_dir / f"{stamp}.txt").write_text("\n\n".join(messages), encoding="utf-8")
-    print(f"[prices] отчёт сохранён: {report_dir / stamp}.txt, расход ≈ ${estimate_cost(total):.2f}")
-
-    if send:
-        send_report(messages)
-    return messages
+    if args.cmd == "init":
+        return 0 if init_run(args.ids or None) else 1
+    if args.cmd == "check":
+        return 1 if check_run(Path(args.run_dir)) else 0
+    finish_run(Path(args.run_dir), send=not args.no_send)
+    return 0

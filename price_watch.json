@@ -1,7 +1,7 @@
 {
   "settings": {
     "company": "Algiz (algiz.uz, aloqa.uz)",
-    "sells": "special-vehicle lights, light bars, sirens and loudspeaker units, breathalyzers",
+    "sells": "проблесковые маяки, световые балки, сирены и СГУ, алкотестеры",
     "own_domains": ["algiz.uz", "aloqa.uz"],
     "landed_cost_pct": null,
     "target_offers": 8,

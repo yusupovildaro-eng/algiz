@@ -9,9 +9,9 @@ Usage:
   python main.py card --force      — post even if already posted
   python main.py editorial         — post editorial (random type)
   python main.py editorial review  — post review specifically
-  python main.py prices            — price agent: competitor prices → report to ADMIN_CHAT_ID
-  python main.py prices ermak      — price agent for selected items from price_watch.json
-  python main.py prices --no-send  — price agent without sending the report
+  python main.py prices init [ids]        — price agent: new run folder + briefs (research: /prices in Claude Code)
+  python main.py prices check <dir>       — which items are not handed in yet
+  python main.py prices report <dir> [--no-send]  — compute and send the report to ADMIN_CHAT_ID
   python main.py init              — initialize DB
 """
 
@@ -99,9 +99,8 @@ def main():
         cmd_editorial(post_type)
 
     elif cmd == "prices":
-        from price_agent import run
-        item_ids = [a for a in args[1:] if not a.startswith("-")]
-        run(item_ids=item_ids or None, send="--no-send" not in args)
+        from price_agent import cli
+        sys.exit(cli(args[1:]))
 
     else:
         print(__doc__)

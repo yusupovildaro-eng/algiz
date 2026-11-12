@@ -1,0 +1,43 @@
+{
+  "business": "Algiz",
+  "settings": {
+    "_note": "Ставки — проверьте у бухгалтера и таможенного брокера.",
+    "vat_pct": 12,
+    "vat_payer": false,
+    "sales_tax_pct": 4,
+    "customs_fee_pct": 0,
+    "target_margin_pct": 30,
+    "manual_rates": {}
+  },
+  "fixed_monthly_uzs": [],
+  "products": [
+    {
+      "id": "tsefey",
+      "name": "Проблесковый маяк «Цефей» (Элина)",
+      "note": "ПРИМЕР: цена — розничный прайс elina.ru; доставка и пошлина условные. Замените своими.",
+      "supplier_price": 8250,
+      "supplier_currency": "RUB",
+      "bank_fee_pct": 1,
+      "delivery_per_unit": 60000,
+      "delivery_currency": "UZS",
+      "duty_pct": 10,
+      "extra_per_unit": [],
+      "sale_price_uzs": null,
+      "sales_per_month": null
+    },
+    {
+      "id": "ermak",
+      "name": "СГУ «Ермак» (Элина)",
+      "note": "ПРИМЕР: цена — розничный прайс elina.ru; доставка и пошлина условные. Замените своими.",
+      "supplier_price": 74580,
+      "supplier_currency": "RUB",
+      "bank_fee_pct": 1,
+      "delivery_per_unit": 250000,
+      "delivery_currency": "UZS",
+      "duty_pct": 10,
+      "extra_per_unit": [],
+      "sale_price_uzs": null,
+      "sales_per_month": null
+    }
+  ]
+}
