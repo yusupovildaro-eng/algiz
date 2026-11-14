@@ -8,7 +8,9 @@ import html
 import io
 import logging
 import os
+import shutil
 import ssl
+import time
 from dataclasses import dataclass, field
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -28,7 +30,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from . import ai, describe
-from .config import config
+from .config import DATA_DIR, config
 from .imaging import cards
 from .imaging.logo import load_logo, remove_logo, save_logo
 from .imaging.photo import ProductPhoto, process, warmup
@@ -99,6 +101,7 @@ class Draft:
     link_title: str = ""
     link_brand: str = ""
     link_desc: str = ""
+    debug_dir: object = None
 
 
 drafts: dict[int, Draft] = {}
@@ -125,6 +128,28 @@ async def access_middleware(handler, event, data):
 
 
 # ---------------- утилиты ----------------
+
+DEBUG_DIR = DATA_DIR / "debug"
+DEBUG_KEEP = 5
+
+
+def _debug_save(d: Draft, name: str, files: list[tuple[str, bytes]]) -> None:
+    """Последние запросы (исходники и готовые карточки) — чтобы разбирать, если что-то вышло криво."""
+    try:
+        if not getattr(d, "debug_dir", None):
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            d.debug_dir = DEBUG_DIR / stamp
+            d.debug_dir.mkdir(parents=True, exist_ok=True)
+            for i, raw in enumerate(d.photos):
+                (d.debug_dir / f"in_{i + 1}.img").write_bytes(raw)
+            (d.debug_dir / "text.txt").write_text(d.text or "", encoding="utf-8")
+            for old in sorted(DEBUG_DIR.iterdir())[:-DEBUG_KEEP]:
+                shutil.rmtree(old, ignore_errors=True)
+        for fname, data in files:
+            (d.debug_dir / f"{name}_{fname}").write_bytes(data)
+    except OSError:
+        log.exception("Не сохранил отладку")
+
 
 def _jpeg(img, quality: int = 94) -> bytes:
     buf = io.BytesIO()
@@ -531,9 +556,11 @@ async def _send_preview(bot: Bot, chat_id: int, d: Draft) -> None:
         note += "\n\nФон на обложке не отделился — фото стоит аккуратной карточкой. Лучше всего вырезается вещь на однотонном фоне."
     elif d.use_cutout and photos[0].cropped:
         note += "\n\nВещь на обложке обрезана краем кадра, поэтому фон оставил. Снимайте так, чтобы вещь целиком помещалась в кадр."
+    preview = _jpeg(img, 90)
+    _debug_save(d, "preview", [(f"cover{d.cover + 1}.jpg", preview)])
     await bot.send_photo(
         chat_id,
-        BufferedInputFile(_jpeg(img, 90), "styles.jpg"),
+        BufferedInputFile(preview, "styles.jpg"),
         caption=f"Выберите стиль карточки. ★ — совет для этой категории.{note}",
         reply_markup=_style_keyboard(d),
     )
@@ -573,6 +600,7 @@ async def cb_style(cb: CallbackQuery, bot: Bot) -> None:
     d.slides = [_jpeg(im) for im in res["slides"]]
     d.story = _jpeg(res["story"])
     d.rendered = True
+    _debug_save(d, style, [(f"slide{i + 1}.jpg", b) for i, b in enumerate(d.slides)] + [("story.jpg", d.story)])
     media = [
         InputMediaPhoto(media=BufferedInputFile(b, f"card_{i + 1}.jpg"),
                         caption=d.caption if i == 0 else None, parse_mode=ParseMode.HTML)
