@@ -307,7 +307,9 @@ def _place(canvas, photo, box, t: Theme, info: CardInfo, use_cutout: bool, *, fi
         light_dx = (box[2] - box[0]) * 0.02 if t.key == "home" else 0.0
         return D.place_cutout(canvas, photo.cutout, box, fill=fill, valign=valign, shadow=shadow,
                               strength=strength, rotate=rotate, light_dx=light_dx)
-    ps = photo_style or {}
+    ps = dict(photo_style or {})
+    if photo.from_screenshot:  # картинка из галереи магазина — показываем целиком, без обрезки
+        ps["contain"] = True
     return D.place_photo(canvas, photo.image, box, **ps)
 
 
@@ -692,7 +694,8 @@ def render_slide(style: str, p: ProductPhoto, info: CardInfo, index: int, total:
     D.draw_text(img, w - m, top + D.cap_h(f_lab), f"{index}/{total}", f_lab, t.muted, anchor="rs")
     bottom = h - m - int(w * 0.06)
     box = (m, top + max(int(w * 0.07), ls), w - m, bottom)
-    _place(img, p, box, t, info, use_cutout, fill=0.92,
+    # слайды из скриншотов (текстуры, инфографика, фото с моделью) — без вырезания, как в магазине
+    _place(img, p, box, t, info, use_cutout and not p.from_screenshot, fill=0.92,
            shadow="float" if t.key == "drop" else None, strength=1.3 if t.key == "drop" else 1.0,
            photo_style={"radius": 0 if t.key == "editorial" else w * 0.026, "shadow": 0.16})
     caption = info.contact or info.title

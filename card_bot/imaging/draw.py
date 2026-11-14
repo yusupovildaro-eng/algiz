@@ -335,9 +335,18 @@ def place_photo(
     rotate: float = 0.0,
     shadow: float = 0.22,
     centering: tuple[float, float] = (0.5, 0.45),
+    contain: bool = False,
 ) -> tuple[int, int, int, int]:
-    """Фото без вырезания фона — аккуратной карточкой со скруглением и тенью."""
+    """Фото без вырезания фона — аккуратной карточкой со скруглением и тенью.
+
+    contain=True — показать картинку целиком, без обрезки (картинки из галереи магазина).
+    """
     x0, y0, x1, y1 = box
+    if contain:
+        s = min((x1 - x0) / photo.width, (y1 - y0) / photo.height)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        nw, nh = photo.width * s, photo.height * s
+        x0, y0, x1, y1 = cx - nw / 2, cy - nh / 2, cx + nw / 2, cy + nh / 2
     bw, bh = int(x1 - x0), int(y1 - y0)
     iw, ih = bw - int(2 * border), bh - int(2 * border)
     img = ImageOps.fit(photo, (iw, ih), Image.LANCZOS, centering=centering)

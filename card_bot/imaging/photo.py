@@ -103,6 +103,14 @@ def _predict_mask(img: Image.Image, model: str | None = None) -> np.ndarray:
     return np.asarray(mask, dtype=np.float32) / 255.0
 
 
+def _unsure(mask: np.ndarray) -> float:
+    """Доля «неуверенных» точек товара: белое на белом, призрачные края. У хорошей маски < 0.1."""
+    fg = mask > 0.15
+    if fg.sum() < 100:
+        return 1.0
+    return float(((mask > 0.15) & (mask < 0.85)).sum() / fg.sum())
+
+
 def _background_is_plain(img: Image.Image, mask: np.ndarray) -> bool:
     """Однотонный фон вокруг товара (страница магазина, студия) — быстрой модели можно верить."""
     small = img.convert("L").resize((max(1, img.width // 4), max(1, img.height // 4)), Image.BILINEAR)
@@ -269,11 +277,23 @@ def _analyze(rgb: np.ndarray, alpha: np.ndarray | None):
     return color, lum, s, palette
 
 
+def _enhance(img: Image.Image, alpha: np.ndarray | None) -> Image.Image:
+    """Баланс белого по фону, уровни и мягкая сочность."""
+    rgb = np.asarray(img, dtype=np.float32) / 255.0
+    ref = rgb[alpha < 0.05] if alpha is not None else rgb.reshape(-1, 3)
+    if len(ref) > 60000:
+        ref = ref[np.random.default_rng(1).choice(len(ref), 60000, replace=False)]
+    out = _white_balance(rgb, ref)
+    out = _tone(out, alpha)
+    return _vibrance(Image.fromarray((out * 255).astype(np.uint8)))
+
+
 def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
     img, own_alpha = load_rgba(data)
     source = img
     screenshot = False
     unusable = False
+    band = None  # для скриншота: полоса во всю ширину с картинкой магазина (показ без вырезания)
 
     alpha = None
     if remove_bg and own_alpha is not None:
@@ -286,6 +306,7 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                 region = _product_region(raw)
                 if region:
                     x0, y0, x1, y1 = region
+                    band = source.crop((0, y0, source.width, y1))
                     img = img.crop(region)
                     raw = raw[y0:y1, x0:x1]
                     screenshot = True
@@ -293,11 +314,19 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                 elif img.height / img.width > 1.95:  # пропорции экрана телефона, а товара не видно
                     unusable = True
                     log.info("Скриншот без товара — пропускаю")
-            if fast and fast != config.rembg_model and not _background_is_plain(img, raw):
-                # сложный фон (кровать, ткань, комната) — переделываем точной моделью
-                log.info("Сложный фон — режу точной моделью %s", config.rembg_model)
-                raw = _predict_mask(img, config.rembg_model)
-            alpha = _clean_mask(raw)
+            if fast and fast != config.rembg_model:
+                if not _background_is_plain(img, raw):
+                    # сложный фон (кровать, ткань, комната) — переделываем точной моделью
+                    log.info("Сложный фон — режу точной моделью %s", config.rembg_model)
+                    raw = _predict_mask(img, config.rembg_model)
+                elif _unsure(raw) > 0.12:
+                    # быстрая модель «не уверена» (белое на белом, пастель) — переделываем точной
+                    log.info("Быстрая модель не уверена (%.2f) — режу точной", _unsure(raw))
+                    raw = _predict_mask(img, config.rembg_model)
+            if _unsure(raw) > 0.15:
+                log.info("Маска ненадёжная (%.2f) — фото без вырезания", _unsure(raw))
+                raw = None
+            alpha = _clean_mask(raw) if raw is not None else np.zeros((img.height, img.width), np.float32)
             cover = float(alpha.mean())
             if cover < 0.015 or cover > 0.985:
                 log.info("Фон не отделился (покрытие %.3f) — оставляю фото как есть", cover)
@@ -306,13 +335,7 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
             log.exception("Ошибка удаления фона — оставляю фото как есть")
             alpha = None
 
-    rgb = np.asarray(img, dtype=np.float32) / 255.0
-    ref = rgb[alpha < 0.05] if alpha is not None else rgb.reshape(-1, 3)
-    if len(ref) > 60000:
-        ref = ref[np.random.default_rng(1).choice(len(ref), 60000, replace=False)]
-    out = _white_balance(rgb, ref)
-    out = _tone(out, alpha)
-    enhanced = _vibrance(Image.fromarray((out * 255).astype(np.uint8)))
+    enhanced = _enhance(img, alpha)
 
     cutout = None
     cropped = alpha is not None and not screenshot and _touches_frame(alpha)
@@ -328,6 +351,7 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
 
     final_rgb = np.asarray(enhanced, dtype=np.float32) / 255.0
     color, lum, sat, palette = _analyze(final_rgb, alpha)
-    return ProductPhoto(image=enhanced, cutout=cutout, color=color, luminance=lum, saturation=sat, cropped=cropped,
+    shown = band if band is not None else enhanced  # фото магазина уже отретушировано — не трогаем цвет
+    return ProductPhoto(image=shown, cutout=cutout, color=color, luminance=lum, saturation=sat, cropped=cropped,
                         palette=palette,
                         source=source, from_screenshot=screenshot, unusable=unusable)
