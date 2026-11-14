@@ -29,6 +29,7 @@ def main() -> None:
     ap.add_argument("--shop", default=config.shop_name)
     ap.add_argument("--contact", default=config.contact or "@my_shop")
     ap.add_argument("--logo", type=Path, help="картинка логотипа (вырежется круг)")
+    ap.add_argument("--channel", default=config.channel_id, help="Telegram-канал, например @my_channel")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -39,7 +40,7 @@ def main() -> None:
 
     d = parse_details(args.text, config.currency)
     d.title = russian_title(d.title)
-    info = to_card_info(d, args.shop, args.contact)
+    info = to_card_info(d, args.shop, args.contact, args.channel)
     if args.logo:
         info.logo = circle_logo(args.logo.read_bytes())
     use_cut = not args.no_cutout

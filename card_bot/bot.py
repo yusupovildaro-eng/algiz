@@ -38,7 +38,7 @@ from .imaging.fonts import font
 from .imaging.photo import ProductPhoto, load_image, process, warmup
 from .storage import settings
 from .links import URL_RE, fetch_product, find_url
-from .text import Details, build_caption, guess_category, parse_details, to_card_info
+from .text import Details, build_caption, channel_name, guess_category, parse_details, to_card_info
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -291,6 +291,8 @@ async def _set(m: Message, cmd: CommandObject, attr: str, label: str) -> None:
         return
     if attr == "contact" and not value.startswith(("@", "+", "http")):
         value = "@" + value
+    if attr == "channel_id" and channel_name(value):
+        value = "@" + channel_name(value)  # ссылку t.me/… тоже понимаем
     setattr(settings, attr, value)
     settings.save()
     await m.answer(f"✅ {label}: <b>{html.escape(value)}</b>")
@@ -515,7 +517,7 @@ async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
         det.category = kind[1]
     original_title = det.title
     det.title = describe.russian_title(det.title)  # «Draped tulle midi dress» → «Платье миди из тюля…»
-    info = to_card_info(det, settings.shop_name, settings.contact)
+    info = to_card_info(det, settings.shop_name, settings.contact, settings.channel_id)
     info.logo = load_logo()
     context = f"{original_title}\n{d.link_desc}\n{' '.join(det.tags)}"
     description = describe.selling_text(f"{det.title} {original_title}", det.category, context)

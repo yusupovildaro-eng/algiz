@@ -255,7 +255,14 @@ def fmt_money(v: float | None, currency: str) -> str:
     return f"{s} {currency}".strip()
 
 
-def to_card_info(d: Details, shop: str, contact: str) -> CardInfo:
+def channel_name(raw: str) -> str:
+    """«@Modnaya_Lux», «t.me/Modnaya_Lux», «https://t.me/Modnaya_Lux» → «Modnaya_Lux» (закрытый -100… → «»)."""
+    raw = (raw or "").strip()
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{4,})", raw) or re.match(r"^@?([A-Za-z][A-Za-z0-9_]{3,})$", raw)
+    return m.group(1) if m else ""
+
+
+def to_card_info(d: Details, shop: str, contact: str, channel: str = "") -> CardInfo:
     discount = ""
     if d.price and d.old_price and d.old_price > d.price:
         discount = f"−{round((d.old_price - d.price) / d.old_price * 100)}%"
@@ -269,6 +276,7 @@ def to_card_info(d: Details, shop: str, contact: str) -> CardInfo:
         tags=d.tags[:5],
         shop=shop,
         contact=contact,
+        channel=f"@{channel_name(channel)}" if channel_name(channel) else "",
         category=d.category,
     )
 
@@ -310,8 +318,13 @@ def build_caption(d: Details, info: CardInfo, description: str = "", hashtags: l
 
     desc = (description or d.note or "").strip()
     while True:
-        parts = [b(info.title), e(desc) if desc else "", "\n".join(lines),
-                 f"📩 Заказ: {e(info.contact)}" if info.contact else "", " ".join(dict.fromkeys(tags))]
+        ch = info.channel.lstrip("@")
+        channel_line = ""
+        if ch:
+            channel_line = (f'📲 Telegram-канал: <a href="https://t.me/{ch}">@{ch}</a>' if html_mode
+                            else f"📲 Telegram-канал: t.me/{ch}")
+        contacts = "\n".join(x for x in [f"📩 Заказ: {e(info.contact)}" if info.contact else "", channel_line] if x)
+        parts = [b(info.title), e(desc) if desc else "", "\n".join(lines), contacts, " ".join(dict.fromkeys(tags))]
         text = "\n\n".join(p for p in parts if p)
         if _visible_len(text) <= max_len or (not desc and not tags):
             break

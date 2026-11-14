@@ -48,6 +48,12 @@ class CardInfo:
     contact: str = ""
     category: str = "clothes"  # clothes | shoes | home | beauty
     logo: Image.Image | None = None  # круглый логотип магазина (RGBA)
+    channel: str = ""  # Telegram-канал магазина, «@name»
+
+    @property
+    def handle(self) -> str:
+        """Что подписать на карточке: личный контакт для заказов или канал."""
+        return self.contact or self.channel
 
 
 @dataclass
@@ -399,8 +405,8 @@ def cover_editorial(p, info, t, size, safe_top, safe_bottom, use_cutout):
         D.draw_text(img, w / 2, top + D.cap_h(f_shop), (info.shop or "").upper(), f_shop, t.ink,
                     tracking=w * 0.009, anchor="ms")
     D.draw_text(img, m, top + D.cap_h(f_shop), "NEW IN", f_small, t.muted, tracking=w * 0.004)
-    if info.contact:
-        D.draw_text(img, w - m, top + D.cap_h(f_shop), info.contact.upper(), f_small, t.muted, tracking=w * 0.003,
+    if info.handle:
+        D.draw_text(img, w - m, top + D.cap_h(f_shop), info.handle.upper(), f_small, t.muted, tracking=w * 0.003,
                     anchor="rs")
 
     word = _masthead_word(info)
@@ -698,7 +704,7 @@ def render_slide(style: str, p: ProductPhoto, info: CardInfo, index: int, total:
     _place(img, p, box, t, info, use_cutout and not p.from_screenshot, fill=0.92,
            shadow="float" if t.key == "drop" else None, strength=1.3 if t.key == "drop" else 1.0,
            photo_style={"radius": 0 if t.key == "editorial" else w * 0.026, "shadow": 0.16})
-    caption = info.contact or info.title
+    caption = info.handle or info.title
     D.draw_text(img, w / 2, h - m, caption, font("sans", int(w * 0.022), 600), t.muted, anchor="ms")
     if t.key == "editorial":
         inset = int(w * 0.03)
@@ -781,11 +787,19 @@ def render_info(style: str, p: ProductPhoto | None, info: CardInfo, size=POST, u
     ch, cy = cta_h, cta_y
     D.paste(img, D.rounded(w - 2 * m, ch, w * 0.03, fill=D.rgba(t.accent)), m, cy)
     f_c1 = font("sans", int(w * 0.024), 600)
-    f_c2 = D.fit_one_line(info.contact or "Пишите в комментарии", t.title_family if t.key == "drop" else "sans",
+    if info.contact:
+        lead, main = "Чтобы заказать — напишите", info.contact
+    elif info.channel:
+        lead, main = "Заказ и новинки — в нашем Telegram", info.channel
+    else:
+        lead, main = "Чтобы заказать —", "пишите в комментарии"
+    f_c2 = D.fit_one_line(main, t.title_family if t.key == "drop" else "sans",
                           800 if t.key != "drop" else 700, w - 2 * m - int(w * 0.1), int(w * 0.05), int(w * 0.03))
-    D.draw_text(img, w / 2, cy + ch * 0.38, "Чтобы заказать — напишите", f_c1, D.mix(t.accent_ink, t.accent, 0.3),
-                anchor="ms")
-    D.draw_text(img, w / 2, cy + ch * 0.78, info.contact or "Пишите в комментарии", f_c2, t.accent_ink, anchor="ms")
+    D.draw_text(img, w / 2, cy + ch * 0.38, lead, f_c1, D.mix(t.accent_ink, t.accent, 0.3), anchor="ms")
+    D.draw_text(img, w / 2, cy + ch * 0.78, main, f_c2, t.accent_ink, anchor="ms")
+    if info.contact and info.channel:  # под плашкой — ещё и канал
+        f_ch = font("sans", int(w * 0.022), 600)
+        D.draw_text(img, w / 2, cy - int(w * 0.025), f"Telegram-канал: {info.channel}", f_ch, t.muted, anchor="ms")
     return D.add_grain(img, 2.4)
 
 
