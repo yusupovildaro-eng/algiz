@@ -664,7 +664,7 @@ def _contact_sheet(d: Draft) -> bytes:
     return _jpeg(sheet, 88)
 
 
-@router.callback_query(F.data == "covers")
+@router.callback_query(F.data.in_({"covers", "cover"}))  # «cover» — кнопка из старых сообщений
 async def cb_covers(cb: CallbackQuery) -> None:
     d = _draft_or_none(cb)
     if not d:
