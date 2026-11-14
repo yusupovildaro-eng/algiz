@@ -39,6 +39,7 @@ class ProductPhoto:
     source: Image.Image | None = None  # исходник целиком (для ИИ: прочитать название со скриншота)
     palette: list = None  # type: ignore[assignment]  # [(RGB, доля)] — цвета товара для подбора фона
     from_screenshot: bool = False
+    unusable: bool = False  # скриншот без товара — в карусель не берём
 
     @property
     def has_cutout(self) -> bool:
@@ -163,6 +164,8 @@ def _product_region(alpha: np.ndarray) -> tuple[int, int, int, int] | None:
         bh, bw = y1 - y0, x1 - x0
         if ar < 0.002 * w * h or bw / bh > 5 or bh / bw > 9 or bw > 0.92 * w:
             continue  # мелочь, кнопки, строки текста, панели во всю ширину
+        if y1 < 0.08 * h or y0 > 0.86 * h:
+            continue  # сверху строка состояния и адреса, снизу «В корзину»/«Купить»
         comps.append((float(ar), y0, y1, x0, x1))
     if not comps:
         return None
@@ -172,6 +175,8 @@ def _product_region(alpha: np.ndarray) -> tuple[int, int, int, int] | None:
            if c[0] >= 0.03 * main[0] and min(c[2], my1) - max(c[1], my0) > 0.3 * min(c[2] - c[1], my1 - my0)]
     y0, y1 = min(c[1] for c in sel), max(c[2] for c in sel)
     x0, x1 = min(c[3] for c in sel), max(c[4] for c in sel)
+    if sum(c[0] for c in sel) < 0.012 * w * h:
+        return None  # на скриншоте нет заметного товара (страница с текстом, отзывы…)
     pad = int(0.08 * max(y1 - y0, x1 - x0))
     box = (max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad))
     if (box[2] - box[0]) * (box[3] - box[1]) > 0.8 * w * h:
@@ -268,6 +273,7 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
     img, own_alpha = load_rgba(data)
     source = img
     screenshot = False
+    unusable = False
 
     alpha = None
     if remove_bg and own_alpha is not None:
@@ -284,6 +290,9 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                     raw = raw[y0:y1, x0:x1]
                     screenshot = True
                     log.info("Скриншот: товар найден в области %s", region)
+                elif img.height / img.width > 1.95:  # пропорции экрана телефона, а товара не видно
+                    unusable = True
+                    log.info("Скриншот без товара — пропускаю")
             if fast and fast != config.rembg_model and not _background_is_plain(img, raw):
                 # сложный фон (кровать, ткань, комната) — переделываем точной моделью
                 log.info("Сложный фон — режу точной моделью %s", config.rembg_model)
@@ -321,4 +330,4 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
     color, lum, sat, palette = _analyze(final_rgb, alpha)
     return ProductPhoto(image=enhanced, cutout=cutout, color=color, luminance=lum, saturation=sat, cropped=cropped,
                         palette=palette,
-                        source=source, from_screenshot=screenshot)
+                        source=source, from_screenshot=screenshot, unusable=unusable)

@@ -171,7 +171,9 @@ def _start_background_processing(d: Draft) -> None:
 
 
 def _photos(d: Draft) -> list[ProductPhoto]:
-    return [d.processed[i] for i in _order(d)]
+    """Фото для карусели: обложка первой, скриншоты без товара пропускаем."""
+    all_ = [d.processed[i] for i in _order(d)]
+    return [p for p in all_ if not p.unusable] or all_
 
 
 def _style_keyboard(d: Draft):
@@ -319,13 +321,17 @@ async def _after_album(bot: Bot, chat_id: int, d: Draft) -> None:
         return
     d.prompted = True
     extra = f" (беру первые {MAX_PHOTOS})" if d.warned_limit else ""
+    if ai.enabled():
+        ask = ("Теперь напишите <b>цену</b> (и размеры, если есть) — название я прочитаю со скриншотов:\n"
+               "<i>450 000</i>")
+    else:
+        ask = ("Теперь напишите <b>название и цену</b> (и размеры, если есть), например:\n"
+               "<i>Крем Calliel Glow Primer SPF 50\n450 000</i>\n\n"
+               "Читать название со скриншотов я смогу, когда подключат ИИ (ключ ANTHROPIC_API_KEY).")
     await bot.send_message(
         chat_id,
         f"📸 Фото: {len(d.photos)}{extra}. Уже убираю фон.\n"
-        "Обложкой будет первое фото — потом её можно поменять кнопкой.\n\n"
-        "Теперь напишите <b>цену</b> — и, если нужно, название и размеры, например:\n"
-        "<i>Крем Calliel Glow Primer SPF 50\n450 000</i>\n\n"
-        "Формат подробно: /help",
+        "Обложкой будет первое фото — потом её можно поменять кнопкой.\n\n" + ask + "\n\nФормат подробно: /help",
     )
 
 
@@ -453,7 +459,6 @@ async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
         async with urgent():
             await _process(d, [d.cover])  # для превью нужна только обложка, остальные — в фоне
         _start_background_processing(d)
-        photos = [d.processed[d.cover]]
     except Exception:  # noqa: BLE001
         log.exception("Ошибка обработки фото")
         await status.edit_text("😔 Не получилось обработать фото. Попробуйте другое фото или /new.")
@@ -482,7 +487,10 @@ async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
             await status.edit_text("✍️ Пишу текст поста…")
         except TelegramAPIError:
             pass
-        res = await ai.describe(photos[0].source or photos[0].image, text)
+        await _process(d, _order(d))  # ИИ нужны все скриншоты: название часто на странице с текстом
+        ordered = [d.processed[i] for i in _order(d)]
+        ordered = ordered[:1] + [p for p in ordered[1:] if p.unusable] + [p for p in ordered[1:] if not p.unusable]
+        res = await ai.describe([p.source or p.image for p in ordered], text)
         if res:
             info.title = (res.get("title") or info.title).strip()[:60]
             info.brand = info.brand or (res.get("brand") or "").strip()
@@ -507,14 +515,22 @@ async def _send_preview(bot: Bot, chat_id: int, d: Draft) -> None:
     rec = cards.recommend_style(d.info)
     async with urgent():
         await _process(d, [d.cover])
+        for _ in range(len(d.photos) - 1):  # обложка без товара (страница с текстом) — берём следующее фото
+            if not d.processed[d.cover].unusable:
+                break
+            d.cover = (d.cover + 1) % len(d.photos)
+            await _process(d, [d.cover])
         photos = [d.processed[d.cover]]
         async with HEAVY:
             img = await asyncio.to_thread(cards.render_preview, photos[0], d.info, d.use_cutout, rec)
     note = ""
+    skipped = sum(1 for p in d.processed.values() if p.unusable)
+    if skipped:
+        note += f"\n\nПропускаю скриншоты без товара (страницы с текстом): {skipped}."
     if d.use_cutout and photos[0].cutout is None:
-        note = "\n\nФон на обложке не отделился — фото стоит аккуратной карточкой. Лучше всего вырезается вещь на однотонном фоне."
+        note += "\n\nФон на обложке не отделился — фото стоит аккуратной карточкой. Лучше всего вырезается вещь на однотонном фоне."
     elif d.use_cutout and photos[0].cropped:
-        note = "\n\nВещь на обложке обрезана краем кадра, поэтому фон оставил. Снимайте так, чтобы вещь целиком помещалась в кадр."
+        note += "\n\nВещь на обложке обрезана краем кадра, поэтому фон оставил. Снимайте так, чтобы вещь целиком помещалась в кадр."
     await bot.send_photo(
         chat_id,
         BufferedInputFile(_jpeg(img, 90), "styles.jpg"),

@@ -36,7 +36,7 @@ SCHEMA = {
 SYSTEM = """Ты пишешь тексты для небольшого магазина: продавец привозит из-за границы одежду, обувь, посуду и иногда косметику \
 и продаёт через Telegram-канал и Instagram. Тебе дают фото товара и заметку продавца.
 
-Часто вместо фото присылают скриншот страницы товара из зарубежного интернет-магазина. Тогда возьми название товара со страницы, тип товара напиши по-русски, а название линейки/оттенка оставь латиницей (например «Палетка теней Pillow Talk Dreams — 2 шт.»). Цены со скриншота не используй — у продавца своя цена.
+Часто вместо фото присылают скриншоты страницы товара из зарубежного интернет-магазина (бывает несколько: фото товара и страница с текстом). Тогда возьми название товара со страницы или с упаковки, тип товара напиши по-русски, а название линейки/оттенка оставь латиницей (например «Палетка теней Pillow Talk Dreams — 2 шт.»). Цены со скриншота не используй — у продавца своя цена.
 
 Верни:
 - title — название для карточки на русском: тип вещи + бренд + модель (например «Кроссовки Nike Air Force 1»). \
@@ -56,14 +56,17 @@ def enabled() -> bool:
 
 def _jpeg_b64(img: Image.Image) -> str:
     im = img.convert("RGB")
-    im.thumbnail((1024, 1024), Image.LANCZOS)
+    im.thumbnail((1200, 1600), Image.LANCZOS)  # скриншот телефона целиком, текст остаётся читаемым
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=88)
     return base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
 
-async def describe(photo: Image.Image, seller_text: str) -> dict | None:
-    """Возвращает dict по SCHEMA или None (нет ключа, отказ, ошибка сети)."""
+async def describe(photos: list[Image.Image], seller_text: str) -> dict | None:
+    """Возвращает dict по SCHEMA или None (нет ключа, отказ, ошибка сети).
+
+    photos — до 4 картинок: обложка и скриншоты, где может быть название товара.
+    """
     if not enabled():
         return None
     import anthropic
@@ -77,7 +80,8 @@ async def describe(photo: Image.Image, seller_text: str) -> dict | None:
         messages=[{
             "role": "user",
             "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_b64(photo)}},
+                *[{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_b64(ph)}}
+                  for ph in photos[:4]],
                 {"type": "text", "text": f"Заметка продавца:\n{seller_text.strip() or '(пусто)'}"},
             ],
         }],
