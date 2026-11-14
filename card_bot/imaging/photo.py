@@ -199,7 +199,44 @@ def _product_region(alpha: np.ndarray) -> tuple[int, int, int, int] | None:
     box = (max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad))
     if (box[2] - box[0]) * (box[3] - box[1]) > 0.8 * w * h:
         return None
+    _product_region.core = (int(x0), int(y0), int(x1), int(y1))  # сам товар, без отступа
     return box
+
+
+def _photo_panel(img: Image.Image, core: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Границы фото магазина, на котором стоит товар: до белых промежутков между фото галереи.
+
+    Так в слайд не попадают кусок соседнего фото сверху/снизу и вкладки сайта под фото.
+    «Страница» — это однотонные строки цвета фона сайта; серый студийный фон фото к ней не относится.
+    """
+    g = np.asarray(img.convert("L"), dtype=np.float32)
+    h, w = g.shape
+    lo, hi = int(0.1 * h), int(0.88 * h)  # строка состояния/адреса сверху, кнопки снизу
+    med = np.median(g, axis=1)
+    # однотонная строка; тонкую полосу прокрутки и шум JPEG не считаем
+    uniform = (np.abs(g - med[:, None]) > 12).mean(axis=1) < 0.02
+    page = float(np.median(med[uniform])) if uniform.any() else 255.0
+    blank = uniform & (np.abs(med - page) < 8)
+    x0, y0, x1, y1 = core
+    top = max(lo, y0)
+    while top > lo and not blank[top - 1]:
+        top -= 1
+    bot = min(hi, y1)
+    while bot < hi and not blank[bot]:
+        bot += 1
+    if bot - top < (y1 - y0) * 0.9:
+        top, bot = max(lo, y0), min(hi, y1)
+    sub = g[top:bot]
+    cmed = np.median(sub, axis=0)
+    cuni = (np.abs(sub - cmed[None, :]) > 12).mean(axis=0) < 0.02
+    content = ~(cuni & (np.abs(cmed - page) < 8))
+    m = max(3, int(0.01 * w))  # полосу прокрутки у самого края не считаем
+    cols = np.where(content[m : w - m])[0]
+    if len(cols):
+        left, right = min(x0, int(cols[0]) + m), max(x1, int(cols[-1]) + m + 1)
+    else:
+        left, right = x0, x1
+    return left, top, right, bot
 
 
 def _touches_frame(alpha: np.ndarray) -> bool:
@@ -316,9 +353,7 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                 region = _product_region(raw)
                 if region:
                     x0, y0, x1, y1 = region
-                    extra = int(0.05 * source.height)  # подписи инфографики над/под картинкой
-                    band = source.crop((0, max(int(0.08 * source.height), y0 - extra), source.width,
-                                        min(int(0.86 * source.height), y1 + extra)))
+                    band = source.crop(_photo_panel(source, _product_region.core))
                     edge_l, edge_r = x0 <= 1, x1 >= source.width - 1
                     img = img.crop(region)
                     raw = raw[y0:y1, x0:x1]
