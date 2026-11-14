@@ -322,22 +322,40 @@ async def on_document(m: Message, bot: Bot) -> None:
 
 # ---------------- текст ----------------
 
+async def _ask_screenshots(m: Message, d: Draft, status: Message) -> None:
+    """Сайт не открылся — просим скриншоты; текст, присланный вместе со ссылкой, запоминаем."""
+    try:
+        await status.delete()
+    except TelegramAPIError:
+        pass
+    tail = ("Цену и текст, которые вы написали со ссылкой, я запомнил — после скриншотов сразу сделаю карточки."
+            if d.have_text else "После скриншотов напишите цену и размеры.")
+    await m.answer(
+        "😔 <b>Не получается открыть эту ссылку</b> — сайт закрыт для ботов.\n\n"
+        "Пришлите, пожалуйста, <b>скриншоты товара</b> (1–5 штук, можно альбомом):\n"
+        "• страницу товара, где хорошо видно фото;\n"
+        "• другие ракурсы, если есть.\n\n"
+        "Я сам найду товар на скриншоте и уберу фон, кнопки и текст сайта.\n" + tail
+    )
+
+
 async def _from_link(m: Message, bot: Bot, url: str) -> None:
     d = drafts.get(m.chat.id)
     if d is None or d.rendered or d.info is not None:
         d = _new_draft(m.chat.id)
+    rest = URL_RE.sub("", m.text or "").strip()
+    if rest:
+        d.text, d.have_text = rest, True
     status = await m.answer("🔗 Открываю ссылку, ищу фото товара…")
     try:
         lp = await fetch_product(url)
     except Exception as e:  # noqa: BLE001
         log.info("Ссылка %s не открылась: %s", url, e)
-        await status.edit_text(
-            "Не получилось открыть ссылку — сайт не пускает ботов 😔\n"
-            "Пришлите скриншот страницы товара — я сам найду на нём товар и уберу всё лишнее."
-        )
+        await _ask_screenshots(m, d, status)
         return
-    if not lp.images:
-        await status.edit_text("На странице не нашёл фото товара. Пришлите скриншот или фото.")
+    if not lp.images:  # открылась «проверка на робота» или страница без фото
+        log.info("На странице %s нет фото товара", url)
+        await _ask_screenshots(m, d, status)
         return
     if d.work and not d.work.done():
         await d.work
@@ -347,9 +365,7 @@ async def _from_link(m: Message, bot: Bot, url: str) -> None:
     d.processed = {i: v for i, v in d.processed.items() if i < len(d.photos)}
     d.link_title, d.link_brand, d.link_desc = lp.title, lp.brand, lp.description
     _start_background_processing(d)
-    rest = URL_RE.sub("", m.text or "").strip()
-    if rest:
-        d.text, d.have_text = rest, True
+    if d.have_text:
         await status.delete()
         await _generate(bot, m.chat.id, d)
         return
