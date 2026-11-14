@@ -23,9 +23,10 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from . import ai
+from . import ai, describe
 from .config import config
 from .imaging import cards
+from .imaging.logo import load_logo, remove_logo, save_logo
 from .imaging.photo import ProductPhoto, process, warmup
 from .storage import settings
 from .links import URL_RE, fetch_product, find_url
@@ -78,9 +79,11 @@ class Draft:
     warned_limit: bool = False
     link_title: str = ""
     link_brand: str = ""
+    link_desc: str = ""
 
 
 drafts: dict[int, Draft] = {}
+awaiting_logo: set[int] = set()
 
 
 # ---------------- доступ ----------------
@@ -206,7 +209,8 @@ async def cmd_settings(m: Message) -> None:
         f"Контакт для заказов: <b>{html.escape(settings.contact or '—')}</b> — /contact @username\n"
         f"Валюта по умолчанию: <b>{html.escape(settings.currency)}</b> — /currency сум (или $, €, ₽)\n"
         f"Канал для публикации: <b>{html.escape(settings.channel_id or '—')}</b> — /channel @канал\n"
-        f"Тексты от ИИ (Claude): <b>{'включены' if ai.enabled() else 'выключены'}</b>\n\n"
+        f"Логотип: <b>{'есть' if load_logo() is not None else 'нет'}</b> — /logo\n"
+        f"Тексты от ИИ (Claude): <b>{'включены' if ai.enabled() else 'выключены (описание по шаблону)'}</b>\n\n"
         "Чтобы публиковать в канал, добавьте бота в администраторы канала с правом публикации."
     )
 
@@ -243,6 +247,17 @@ async def cmd_channel(m: Message, command: CommandObject) -> None:
     await _set(m, command, "channel_id", "Канал")
 
 
+@router.message(Command("logo"))
+async def cmd_logo(m: Message, command: CommandObject) -> None:
+    if (command.args or "").strip().lower() in ("off", "нет", "удалить", "убрать"):
+        remove_logo()
+        await m.answer("Логотип убран с карточек.")
+        return
+    awaiting_logo.add(m.chat.id)
+    await m.answer("Пришлите логотип картинкой — лучше квадратную аватарку канала. "
+                   "Я вырежу круг и поставлю его в угол каждой карточки.\nУбрать логотип: /logo off")
+
+
 @router.message(Command("new"))
 async def cmd_new(m: Message) -> None:
     _new_draft(m.chat.id)
@@ -261,6 +276,11 @@ async def _after_album(bot: Bot, chat_id: int, d: Draft) -> None:
 
 
 async def _add_photo(m: Message, bot: Bot, file_id: str) -> None:
+    if m.chat.id in awaiting_logo:
+        awaiting_logo.discard(m.chat.id)
+        await asyncio.to_thread(save_logo, await _download(bot, file_id))
+        await m.answer("✅ Логотип сохранён — он будет на всех новых карточках.")
+        return
     d = drafts.get(m.chat.id)
     if d is None or d.rendered or (d.have_text and d.info is not None):
         d = _new_draft(m.chat.id)
@@ -322,7 +342,7 @@ async def _from_link(m: Message, bot: Bot, url: str) -> None:
     d.processed = {i + shift: v for i, v in d.processed.items()}
     d.photos = (lp.images + d.photos)[:MAX_PHOTOS]
     d.processed = {i: v for i, v in d.processed.items() if i < len(d.photos)}
-    d.link_title, d.link_brand = lp.title, lp.brand
+    d.link_title, d.link_brand, d.link_desc = lp.title, lp.brand, lp.description
     _start_background_processing(d)
     rest = URL_RE.sub("", m.text or "").strip()
     if rest:
@@ -373,8 +393,16 @@ async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
             text = f"{d.link_title}\n{text}"
     det = parse_details(text, settings.currency)
     det.brand = det.brand or d.link_brand
+    kind = describe.detect_type(det.title)
+    if kind and det.category == "clothes":
+        det.category = kind[1]
+    original_title = det.title
+    det.title = describe.russian_title(det.title)  # «Draped tulle midi dress» → «Платье миди из тюля…»
     info = to_card_info(det, settings.shop_name, settings.contact)
-    description, hashtags = "", None
+    info.logo = load_logo()
+    context = f"{original_title}\n{d.link_desc}\n{' '.join(det.tags)}"
+    description = describe.selling_text(f"{det.title} {original_title}", det.category, context)
+    hashtags = None
     if ai.enabled():
         try:
             await status.edit_text("✍️ Пишу текст поста…")
@@ -386,7 +414,7 @@ async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
             info.brand = info.brand or (res.get("brand") or "").strip()
             if res.get("category") in ("clothes", "shoes", "home", "beauty") and guess_category(text) == "clothes":
                 info.category = res["category"]
-            description = res.get("description") or ""
+            description = res.get("description") or description
             hashtags = [h for h in res.get("hashtags") or [] if isinstance(h, str)][:8] or None
     d.details, d.info = det, info
     d.caption = build_caption(det, info, description, hashtags)
@@ -572,6 +600,7 @@ async def run() -> None:
         BotCommand(command="start", description="Как пользоваться"),
         BotCommand(command="new", description="Начать новую карточку"),
         BotCommand(command="settings", description="Название магазина, контакт, канал"),
+        BotCommand(command="logo", description="Поставить логотип на карточки"),
         BotCommand(command="help", description="Подсказка по формату текста"),
     ])
     asyncio.get_running_loop().run_in_executor(None, warmup)  # модель фона грузится в фоне

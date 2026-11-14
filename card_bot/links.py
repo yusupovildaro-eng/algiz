@@ -36,6 +36,7 @@ class LinkProduct:
     url: str
     title: str = ""
     brand: str = ""
+    description: str = ""
     images: list[bytes] = field(default_factory=list)
 
 
@@ -127,6 +128,9 @@ async def fetch_product(url: str) -> LinkProduct:
             m = re.search(r"<title[^>]*>(.*?)</title>", page, re.S | re.I)
             title = m.group(1) if m else ""
         res.title = clean_title(title, site)
+        desc = str(products[0].get("description") or "") if products else ""
+        desc = desc or (_meta(page, "og:description", "description", "twitter:description") or [""])[0]
+        res.description = re.sub(r"<[^>]+>", " ", html.unescape(desc))[:1500]
         brand = products[0].get("brand") if products else None
         if isinstance(brand, dict):
             brand = brand.get("name")

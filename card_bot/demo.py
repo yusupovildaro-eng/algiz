@@ -14,6 +14,8 @@ from pathlib import Path
 from .config import config
 from .imaging import cards
 from .imaging.photo import process
+from .describe import russian_title, selling_text
+from .imaging.logo import circle_logo
 from .text import build_caption, parse_details, to_card_info
 
 
@@ -26,6 +28,7 @@ def main() -> None:
     ap.add_argument("--no-cutout", action="store_true", help="не вырезать фон")
     ap.add_argument("--shop", default=config.shop_name)
     ap.add_argument("--contact", default=config.contact or "@my_shop")
+    ap.add_argument("--logo", type=Path, help="картинка логотипа (вырежется круг)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -35,7 +38,10 @@ def main() -> None:
     print(f"Фото обработаны за {time.time() - t0:.1f} с (фон вырезан: {[p.has_cutout for p in photos]})")
 
     d = parse_details(args.text, config.currency)
+    d.title = russian_title(d.title)
     info = to_card_info(d, args.shop, args.contact)
+    if args.logo:
+        info.logo = circle_logo(args.logo.read_bytes())
     use_cut = not args.no_cutout
     rec = cards.recommend_style(info)
     cards.render_preview(photos[0], info, use_cut, rec).save(args.out / "preview.jpg", quality=92)
@@ -47,7 +53,8 @@ def main() -> None:
             im.save(args.out / f"{st}_{i}.jpg", quality=94, subsampling=0)
         res["story"].save(args.out / f"{st}_story.jpg", quality=94, subsampling=0)
         print(f"{st}: {len(res['slides'])} слайдов + сторис за {time.time() - t1:.1f} с")
-    (args.out / "caption.txt").write_text(build_caption(d, info, html_mode=False), encoding="utf-8")
+    desc = selling_text(info.title, info.category)
+    (args.out / "caption.txt").write_text(build_caption(d, info, desc, html_mode=False), encoding="utf-8")
     print(f"Готово: {args.out.resolve()}")
 
 

@@ -47,6 +47,7 @@ class CardInfo:
     shop: str = ""
     contact: str = ""
     category: str = "clothes"  # clothes | shoes | home | beauty
+    logo: Image.Image | None = None  # круглый логотип магазина (RGBA)
 
 
 @dataclass
@@ -89,40 +90,86 @@ def _hue(c: RGB) -> float:
     return colorsys.rgb_to_hsv(*(v / 255 for v in c))[0]
 
 
+def _hsv(h: float, s: float, v: float) -> RGB:
+    return tuple(int(round(c * 255)) for c in colorsys.hsv_to_rgb(h % 1.0, max(0, min(1, s)), max(0, min(1, v))))  # type: ignore[return-value]
+
+
+def accent(p: ProductPhoto | None) -> RGB | None:
+    """Самый «говорящий» цвет товара: насыщенный и заметный по площади (золото крышки, розовые тени…)."""
+    if p is None or not p.palette:
+        return None
+    best, score = None, 0.0
+    for c, share in p.palette:
+        _, s, v = colorsys.rgb_to_hsv(*(x / 255 for x in c))
+        if share < 0.04 or s < 0.16 or v < 0.14:
+            continue
+        sc = s * share ** 0.5 * (0.6 + 0.4 * v)
+        if sc > score:
+            best, score = c, sc
+    return best
+
+
+def _warmth(p: ProductPhoto | None) -> float:
+    """Оттенок для нейтральных товаров: тёплый беж или холодный серый — по самому товару."""
+    if p is None or not p.palette:
+        return 0.08
+    r = sum(c[0] * sh for c, sh in p.palette)
+    b = sum(c[2] * sh for c, sh in p.palette)
+    return 0.08 if r >= b else 0.6
+
+
 def _drop_color(p: ProductPhoto | None) -> RGB:
     if p is None:
         return DROP_COLORS[0]
-    if p.saturation < 0.22:
+    acc = accent(p)
+    if acc is None:
         if p.luminance > 0.58:
             return DROP_COLORS[0]  # белое/светлое — на кобальте
         if p.luminance < 0.32:
             return DROP_COLORS[2]  # чёрное — на лайме
         return DROP_COLORS[1]
-    h = _hue(p.color)
+    h = _hue(acc)
 
     def dist(c: RGB) -> float:
         d = abs(_hue(c) - h)
         return min(d, 1 - d)
 
-    return max(DROP_COLORS, key=dist)
+    return max(DROP_COLORS, key=dist)  # контраст: цвет напротив главного цвета товара
+
+
+def _promo_palette(p: ProductPhoto | None) -> tuple[RGB, RGB, RGB]:
+    """Глубокий градиент в тон товару: золото → бронза, розовое → винный, беж → мокко."""
+    if p is None:
+        return PROMO_PALETTES[0]
+    acc = accent(p)
+    dark_item = p.luminance < 0.32
+    if acc is not None:
+        h, s, _ = colorsys.rgb_to_hsv(*(x / 255 for x in acc))
+        s2 = min(0.78, max(0.5, s * 1.25))
+        return (_hsv(h, s2, 0.31), _hsv(h, s2 * 0.72, 0.68 if dark_item else 0.6),
+                _hsv(h, 0.22, 0.98))
+    h = _warmth(p)
+    if dark_item:  # чёрное платье: низ светлее, чтобы вещь читалась
+        return _hsv(h, 0.2, 0.30), _hsv(h, 0.14, 0.64), _hsv(h, 0.06, 0.98)
+    return _hsv(h, 0.34, 0.20), _hsv(h, 0.28, 0.43), _hsv(h, 0.14, 0.95)
 
 
 def theme_for(style: str, p: ProductPhoto | None) -> Theme:
+    """Палитра карточки подбирается под цвета конкретного товара."""
     l = p.luminance if p else 0.5
+    acc = accent(p)
+    hue = _hue(acc) if acc else _warmth(p)
     if style == "studio":
         v = 0.885 if l > 0.72 else (0.955 if l < 0.28 else 0.925)
-        if p and p.saturation > 0.25:
-            h = _hue(p.color)
-            bg = tuple(int(c * 255) for c in colorsys.hsv_to_rgb(h, 0.07, v))
-        else:
-            bg = tuple(int(c * 255) for c in colorsys.hsv_to_rgb(0.08, 0.045, v))
-        return Theme("studio", bg, (22, 22, 22), (112, 106, 100), (22, 22, 22), (255, 255, 255))  # type: ignore[arg-type]
+        bg = _hsv(hue, 0.075 if acc else 0.045, v)
+        return Theme("studio", bg, (22, 22, 22), (112, 106, 100), (22, 22, 22), (255, 255, 255))
     if style == "editorial":
-        if l > 0.74:  # светлый товар — тёмная «люкс» версия
-            return Theme("editorial", (38, 33, 30), (240, 233, 222), (176, 165, 150), (240, 233, 222), (38, 33, 30),
+        if l > 0.74:  # светлый товар — тёмная «люкс» версия в тон товару
+            bg = _hsv(hue, 0.4 if acc else 0.22, 0.16)
+            return Theme("editorial", bg, (240, 233, 222), (176, 165, 150), (240, 233, 222), bg,
                          title_family="serif", title_weight=500)
-        return Theme("editorial", (241, 235, 225), (33, 29, 26), (128, 118, 106), (33, 29, 26), (241, 235, 225),
-                     title_family="serif", title_weight=500)
+        return Theme("editorial", _hsv(hue, 0.085 if acc else 0.075, 0.95), (33, 29, 26), (128, 118, 106),
+                     (33, 29, 26), (241, 235, 225), title_family="serif", title_weight=500)
     if style == "drop":
         bg = _drop_color(p)
         light = D.lum(bg) > 0.62
@@ -132,15 +179,11 @@ def theme_for(style: str, p: ProductPhoto | None) -> Theme:
         return Theme("drop", bg, ink, muted, ink, bg, title_family="display", title_weight=700,
                      label_family="display", sticker=sticker, sticker_ink=sticker_ink)
     if style == "promo":
-        top, bottom, glow = PROMO_PALETTES[0]
-        if p and p.saturation > 0.3 and p.luminance < 0.42:
-            h = _hue(p.color)
-            if h > 0.75 or h < 0.03:  # тёмно-ягодный товар сольётся с фоном — берём синюю гамму
-                top, bottom, glow = PROMO_PALETTES[1]
+        top, bottom, glow = _promo_palette(p)
         return Theme("promo", top, (255, 255, 255), D.mix(glow, (255, 255, 255), 0.35), (255, 255, 255), top,
                      title_family="serif", title_weight=500, sticker=bottom, sticker_ink=glow)
-    # home
-    bg = (222, 211, 196) if l > 0.78 else (234, 226, 214)
+    # home: лён в тон товару
+    bg = _hsv(hue, 0.14 if acc else 0.11, 0.87 if l > 0.78 else 0.92)
     return Theme("home", bg, (58, 48, 40), (130, 116, 102), (58, 48, 40), (250, 246, 240),
                  title_family="serif", title_weight=500)
 
@@ -232,6 +275,21 @@ def _strike(canvas, x, y_base, text, f, color, anchor="ls"):
     return w
 
 
+def _logo(canvas: Image.Image, info: CardInfo, x: float, y: float, size: int, anchor: str = "l") -> int:
+    """Круглый логотип магазина с мягкой тенью. Возвращает его размер (0 — логотипа нет)."""
+    if info.logo is None:
+        return 0
+    lg = info.logo.resize((size, size), Image.LANCZOS)
+    if anchor == "m":
+        x -= size / 2
+    elif anchor == "r":
+        x -= size
+    blur = size * 0.05
+    D.paste(canvas, D.soft_shadow(size, size, size / 2, blur, 0.28), x - int(blur * 3), y - int(blur * 3) + size * 0.03)
+    D.paste(canvas, lg, x, y)
+    return size
+
+
 def _cut(p: ProductPhoto | None, use_cutout: bool) -> bool:
     """Показывать ли товар вырезанным: фон отделился и товар не обрезан краем кадра."""
     return bool(use_cutout and p is not None and p.cutout is not None and not p.cropped)
@@ -269,7 +327,9 @@ def cover_studio(p, info, t, size, safe_top, safe_bottom, use_cutout):
     top = safe_top + m
 
     f_shop = font("sans", int(w * 0.024), 700)
-    D.draw_text(img, m, top + D.cap_h(f_shop), (info.shop or "").upper(), f_shop, t.ink, tracking=w * 0.004)
+    head = _logo(img, info, m, top - int(w * 0.025), int(w * 0.12)) - int(w * 0.025)
+    if not head > 0:
+        D.draw_text(img, m, top + D.cap_h(f_shop), (info.shop or "").upper(), f_shop, t.ink, tracking=w * 0.004)
     f_tag = font("sans", int(w * 0.02), 600)
     x_r = w - m
     for tag in reversed(info.tags[:2]):
@@ -289,7 +349,7 @@ def cover_studio(p, info, t, size, safe_top, safe_bottom, use_cutout):
     y = h - safe_bottom - m - block
 
     # товар
-    box = (m, top + int(w * 0.06), w - m, y - int(w * 0.03))
+    box = (m, top + max(int(w * 0.06), head + int(w * 0.015)), w - m, y - int(w * 0.03))
     bb = _place(img, p, box, t, info, use_cutout, fill=0.9,
                 photo_style={"radius": w * 0.026, "shadow": 0.18})
 
@@ -331,8 +391,11 @@ def cover_editorial(p, info, t, size, safe_top, safe_bottom, use_cutout):
 
     f_small = font("sans", int(w * 0.017), 650)
     f_shop = font("serif", int(w * 0.03), 500)
-    D.draw_text(img, w / 2, top + D.cap_h(f_shop), (info.shop or "").upper(), f_shop, t.ink, tracking=w * 0.009,
-                anchor="ms")
+    ls = _logo(img, info, w / 2, top - int(w * 0.02), int(w * 0.11), "m")
+    extra = max(0, ls - D.cap_h(f_shop) - int(w * 0.035))
+    if not ls:
+        D.draw_text(img, w / 2, top + D.cap_h(f_shop), (info.shop or "").upper(), f_shop, t.ink,
+                    tracking=w * 0.009, anchor="ms")
     D.draw_text(img, m, top + D.cap_h(f_shop), "NEW IN", f_small, t.muted, tracking=w * 0.004)
     if info.contact:
         D.draw_text(img, w - m, top + D.cap_h(f_shop), info.contact.upper(), f_small, t.muted, tracking=w * 0.003,
@@ -340,7 +403,7 @@ def cover_editorial(p, info, t, size, safe_top, safe_bottom, use_cutout):
 
     word = _masthead_word(info)
     f_mast = D.fit_one_line(word, "serif_italic", 450, w - 2 * m * 1.3, int(w * 0.2), int(w * 0.08))
-    mast_y = top + int(w * 0.07) + D.cap_h(f_mast)
+    mast_y = top + extra + int(w * 0.07) + D.cap_h(f_mast)
     D.draw_text(img, w / 2, mast_y, word, f_mast, t.ink, anchor="ms")
 
     # низ
@@ -395,7 +458,7 @@ def cover_drop(p, info, t, size, safe_top, safe_bottom, use_cutout):
         tail = title_words[idx + len(bw):] if idx is not None else [x for x in title_words if x not in bw]
     else:
         first, tail = (title_words[0] if title_words else "NEW"), title_words[1:]
-    f0 = D.fit_one_line(first, "display", 900, w - m, int(w * 0.3), int(w * 0.08))
+    f0 = D.fit_one_line(first, "display", 900, w - m, int(w * 0.3), int(w * 0.055))
     if D.text_w(first, f0) > w - m and " " in first:  # длинный бренд — в две строки
         first, rest_brand = first.split(" ", 1)
         f0 = D.fit_one_line(first, "display", 900, w - m, int(w * 0.3), int(w * 0.06))
@@ -410,7 +473,8 @@ def cover_drop(p, info, t, size, safe_top, safe_bottom, use_cutout):
                 lines_big.append(cand)
                 fonts_big.append(f1)
                 break
-    yb = top + int(w * 0.09)
+    shift = int(w * 0.03) if info.logo is not None else 0
+    yb = top + int(w * 0.09) + shift
     for i, (ln, f) in enumerate(zip(lines_big, fonts_big)):
         yb += D.cap_h(f)
         if i == 0:
@@ -427,13 +491,14 @@ def cover_drop(p, info, t, size, safe_top, safe_bottom, use_cutout):
     f_lab = font("display", int(w * 0.019), 600)
     _pill(img, m, top - int(w * 0.012), "NEW DROP", f_lab, fill=t.ink, ink=t.ink, outline=True, h=int(w * 0.05),
           tracking=w * 0.002)
-    D.draw_text(img, w - m, top + int(w * 0.013) + D.cap_h(f_lab) / 2, (info.shop or "").upper(), f_lab, t.ink,
-                anchor="rs", tracking=w * 0.002)
+    if not _logo(img, info, w - m, top - int(w * 0.025), int(w * 0.11), "r"):
+        D.draw_text(img, w - m, top + int(w * 0.013) + D.cap_h(f_lab) / 2, (info.shop or "").upper(), f_lab, t.ink,
+                    anchor="rs", tracking=w * 0.002)
 
     rotate = 0.0
     if has_cut and info.category == "shoes" and p.cutout.width > p.cutout.height * 1.2:
         rotate = 10.0
-    box_top = top + int(w * 0.09) + first_cap * (0.6 if has_cut else 1.25)
+    box_top = top + int(w * 0.09) + shift + first_cap * (0.6 if has_cut else 1.25)
     box = (m * 0.6, box_top, w - m * 0.6, h - safe_bottom - int(w * 0.22))
     _place(img, p, box, t, info, use_cutout, fill=0.94, rotate=rotate, shadow="float", strength=1.5,
            photo_style={"radius": w * 0.02, "border": w * 0.018, "border_color": (255, 255, 255), "rotate": -3,
@@ -501,7 +566,8 @@ def cover_home(p, info, t, size, safe_top, safe_bottom, use_cutout):
                + (g2 + D.cap_h(f_tags) if extra else 0) + int(pad * 1.1))
     py = h - safe_bottom - m - panel_h
 
-    box = (m, top, w - m, py - int(w * 0.03))
+    ls = _logo(img, info, m, top - int(w * 0.025), int(w * 0.12))
+    box = (m, top + ls * 0.55, w - m, py - int(w * 0.03))
     _place(img, p, box, t, info, use_cutout, fill=0.9,
            photo_style={"radius": w * 0.03, "shadow": 0.16})
 
@@ -539,6 +605,7 @@ def cover_promo(p, info, t, size, safe_top, safe_bottom, use_cutout):
     white = (255, 255, 255)
     y = safe_top + int(w * 0.06)
 
+    _logo(img, info, m * 0.6, y - int(w * 0.03), int(w * 0.1))
     f_k = font("sans", int(w * 0.028), 400)
     kicker = ("НОВЫЕ ПОСТУПЛЕНИЯ" if not info.discount else "ВЫГОДНОЕ ПРЕДЛОЖЕНИЕ") + "!"
     D.draw_text(img, w / 2, y + D.cap_h(f_k), kicker, f_k, white, tracking=w * 0.002, anchor="ms")
@@ -619,10 +686,12 @@ def render_slide(style: str, p: ProductPhoto, info: CardInfo, index: int, total:
     img = background(t, w, h)
     f_lab = font(t.label_family, int(w * 0.022), 650)
     top = m
-    D.draw_text(img, m, top + D.cap_h(f_lab), (info.shop or "").upper(), f_lab, t.ink, tracking=w * 0.004)
+    ls = _logo(img, info, m, top - int(w * 0.025), int(w * 0.1))
+    if not ls:
+        D.draw_text(img, m, top + D.cap_h(f_lab), (info.shop or "").upper(), f_lab, t.ink, tracking=w * 0.004)
     D.draw_text(img, w - m, top + D.cap_h(f_lab), f"{index}/{total}", f_lab, t.muted, anchor="rs")
     bottom = h - m - int(w * 0.06)
-    box = (m, top + int(w * 0.07), w - m, bottom)
+    box = (m, top + max(int(w * 0.07), ls), w - m, bottom)
     _place(img, p, box, t, info, use_cutout, fill=0.92,
            shadow="float" if t.key == "drop" else None, strength=1.3 if t.key == "drop" else 1.0,
            photo_style={"radius": 0 if t.key == "editorial" else w * 0.026, "shadow": 0.16})
@@ -643,7 +712,9 @@ def render_info(style: str, p: ProductPhoto | None, info: CardInfo, size=POST, u
     if t.key == "home":
         img = D.bg_linen(w, h, t.bg)
     f_lab = font(t.label_family, int(w * 0.022), 650)
-    D.draw_text(img, m, m + D.cap_h(f_lab), (info.shop or "").upper(), f_lab, t.ink, tracking=w * 0.004)
+    ls = _logo(img, info, m, m - int(w * 0.025), int(w * 0.1))
+    if not ls:
+        D.draw_text(img, m, m + D.cap_h(f_lab), (info.shop or "").upper(), f_lab, t.ink, tracking=w * 0.004)
 
     thumb = int(w * 0.34)
     if p is not None:
@@ -651,7 +722,7 @@ def render_info(style: str, p: ProductPhoto | None, info: CardInfo, size=POST, u
         _place(img, p, tb, t, info, use_cutout, fill=0.95, shadow="float",
                photo_style={"radius": w * 0.025, "shadow": 0.14})
 
-    y = m + int(w * 0.11)
+    y = m + max(int(w * 0.11), ls + int(w * 0.02))
     tw = w - 2 * m - (thumb + int(w * 0.04) if p is not None else 0)
     f_title, lines = D.fit_lines(info.title, t.title_family, t.title_weight, tw, 3, int(w * 0.06), int(w * 0.04))
     tl = int(D.line_h(f_title) * 1.02)
@@ -767,7 +838,7 @@ def render_preview(p: ProductPhoto | None, info: CardInfo, use_cutout=True, reco
 def recommend_style(info: CardInfo) -> str:
     if info.discount or info.category == "beauty":
         return "promo"
-    return {"shoes": "drop", "home": "home"}.get(info.category, "studio")
+    return {"shoes": "studio", "home": "home"}.get(info.category, "editorial")
 
 
 def render_set(style: str, photos: list[ProductPhoto], info: CardInfo, use_cutout=True) -> dict[str, list[Image.Image] | Image.Image]:

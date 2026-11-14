@@ -37,6 +37,7 @@ class ProductPhoto:
     saturation: float  # насыщенность основного цвета 0..1
     cropped: bool = False  # товар обрезан краем кадра — вырезанным он будет смотреться странно
     source: Image.Image | None = None  # исходник целиком (для ИИ: прочитать название со скриншота)
+    palette: list = None  # type: ignore[assignment]  # [(RGB, доля)] — цвета товара для подбора фона
     from_screenshot: bool = False
 
     @property
@@ -212,7 +213,8 @@ def _vibrance(img: Image.Image, amount: float = 0.12) -> Image.Image:
     return Image.fromarray(hsv.astype(np.uint8), "HSV").convert("RGB")
 
 
-def _analyze(rgb: np.ndarray, alpha: np.ndarray | None) -> tuple[tuple[int, int, int], float, float]:
+def _analyze(rgb: np.ndarray, alpha: np.ndarray | None):
+    """Яркость товара и его палитра: [(цвет, доля), …] по убыванию доли."""
     if alpha is not None and (alpha > 0.8).sum() > 200:
         px = rgb[alpha > 0.8]
     else:
@@ -221,15 +223,14 @@ def _analyze(rgb: np.ndarray, alpha: np.ndarray | None) -> tuple[tuple[int, int,
     if len(px) > 40000:
         px = px[np.random.default_rng(0).choice(len(px), 40000, replace=False)]
     lum = float((px @ np.array([0.299, 0.587, 0.114])).mean())
-    # основной цвет: самый частый кластер после квантования
     small = Image.fromarray((px.reshape(-1, 1, 3) * 255).astype(np.uint8))
-    q = small.quantize(colors=5, method=Image.Quantize.MEDIANCUT)
-    pal = q.getpalette()[:15]
-    counts = sorted(q.getcolors(), reverse=True)
-    idx = counts[0][1]
-    color = tuple(pal[idx * 3 : idx * 3 + 3])
+    q = small.quantize(colors=6, method=Image.Quantize.MEDIANCUT)
+    pal = q.getpalette()
+    total = float(len(px))
+    palette = [(tuple(pal[i * 3 : i * 3 + 3]), n / total) for n, i in sorted(q.getcolors(), reverse=True)]
+    color = palette[0][0]
     _, s, _ = colorsys.rgb_to_hsv(*(c / 255 for c in color))
-    return color, lum, s  # type: ignore[return-value]
+    return color, lum, s, palette
 
 
 def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
@@ -279,6 +280,7 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
             cutout = rgba.crop(bbox)
 
     final_rgb = np.asarray(enhanced, dtype=np.float32) / 255.0
-    color, lum, sat = _analyze(final_rgb, alpha)
+    color, lum, sat, palette = _analyze(final_rgb, alpha)
     return ProductPhoto(image=enhanced, cutout=cutout, color=color, luminance=lum, saturation=sat, cropped=cropped,
+                        palette=palette,
                         source=source, from_screenshot=screenshot)
