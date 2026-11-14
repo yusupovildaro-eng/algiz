@@ -33,6 +33,7 @@ from PIL import Image, ImageDraw
 from . import ai, describe
 from .config import DATA_DIR, config
 from .imaging import cards
+from .imaging import retext
 from .imaging.logo import load_logo, remove_logo, save_logo
 from .imaging.fonts import font
 from .imaging.photo import ProductPhoto, load_image, process, warmup
@@ -104,6 +105,7 @@ class Draft:
     link_brand: str = ""
     link_desc: str = ""
     debug_dir: object = None
+    translated: set = field(default_factory=set)  # номера фото, где надписи уже переведены
 
 
 drafts: dict[int, Draft] = {}
@@ -279,6 +281,7 @@ async def cmd_settings(m: Message) -> None:
         f"Валюта по умолчанию: <b>{html.escape(settings.currency)}</b> — /currency сум (или $, €, ₽)\n"
         f"Канал для публикации: <b>{html.escape(settings.channel_id or '—')}</b> — /channel @канал\n"
         f"Логотип: <b>{'есть' if load_logo() is not None else 'нет'}</b> — /logo\n"
+        f"Перевод надписей на картинках: <b>{'вкл' if settings.translate else 'выкл'}</b> — /translate\n"
         f"Тексты от ИИ (Claude): <b>{'включены' if ai.enabled() else 'выключены (описание по шаблону)'}</b>\n\n"
         "Чтобы публиковать в канал, добавьте бота в администраторы канала с правом публикации."
     )
@@ -327,6 +330,19 @@ async def cmd_logo(m: Message, command: CommandObject) -> None:
     awaiting_logo.add(m.chat.id)
     await m.answer("Пришлите логотип картинкой — лучше квадратную аватарку канала. "
                    "Я вырежу круг и поставлю его в угол каждой карточки.\nУбрать логотип: /logo off")
+
+
+@router.message(Command("translate"))
+async def cmd_translate(m: Message, command: CommandObject) -> None:
+    arg = (command.args or "").strip().lower()
+    if arg in ("on", "вкл", "да"):
+        settings.translate = True
+    elif arg in ("off", "выкл", "нет"):
+        settings.translate = False
+    settings.save()
+    state = "включён" if settings.translate else "выключен"
+    extra = "" if ai.enabled() else "\nРаботает, когда подключён ИИ (ключ ANTHROPIC_API_KEY)."
+    await m.answer(f"Перевод надписей на картинках {state}. Включить/выключить: /translate on | off{extra}")
 
 
 @router.message(Command("new"))
@@ -608,6 +624,7 @@ async def cb_style(cb: CallbackQuery, bot: Bot) -> None:
                 await status.delete()
             except TelegramAPIError:
                 pass
+        await _translate_images(bot, chat_id, d)
         photos = _photos(d)
         async with HEAVY:
             res = await asyncio.to_thread(cards.render_set, style, photos, d.info, d.use_cutout)
@@ -628,6 +645,35 @@ async def cb_style(cb: CallbackQuery, bot: Bot) -> None:
         "Новый товар — просто пришлите новые фото. Поправить текст — отправьте его заново.",
         reply_markup=_actions_keyboard(d),
     )
+
+
+async def _translate_images(bot: Bot, chat_id: int, d: Draft) -> None:
+    """Надписи на картинках магазина (турецкий, английский…) → русский. Только с ИИ и только один раз."""
+    if not (ai.enabled() and settings.translate):
+        return
+    todo = [i for i in _order(d) if i not in d.translated and d.processed[i].from_screenshot
+            and not d.processed[i].unusable]
+    if not todo:
+        return
+    status = await bot.send_message(chat_id, "🌐 Перевожу надписи на картинках…")
+    for i in todo:
+        d.translated.add(i)
+        p = d.processed[i]
+        try:
+            async with HEAVY:
+                blocks = await asyncio.to_thread(retext.find_blocks, p.image)
+            if not blocks:
+                continue
+            marked = retext.debug_boxes(p.image, blocks)
+            ru = await ai.translate_blocks(marked, [b.text for b in blocks])
+            if ru and any(ru):
+                p.image = await asyncio.to_thread(retext.replace_text, p.image, blocks, ru)
+        except Exception:  # noqa: BLE001
+            log.exception("Перевод надписей не удался — оставляю картинку как есть")
+    try:
+        await status.delete()
+    except TelegramAPIError:
+        pass
 
 
 @router.callback_query(F.data == "cut")

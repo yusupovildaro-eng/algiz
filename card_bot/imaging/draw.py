@@ -132,6 +132,8 @@ def wrap(text: str, f, max_w: float, max_lines: int) -> tuple[list[str], bool]:
             cur = w
     if cur:
         lines.append(cur)
+    if any(f.getlength(ln) > max_w for ln in lines):
+        ok = False  # одно длинное слово шире строки
     if len(lines) > max_lines:
         ok = False
         lines = lines[:max_lines]

@@ -118,3 +118,80 @@ async def describe(photos: list[Image.Image], seller_text: str) -> dict | None:
         log.warning("Claude вернул не-JSON — текст по шаблону")
         return None
     return data if isinstance(data, dict) else None
+
+
+TRANSLATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "ru": {"type": "string"}},
+                "required": ["id", "ru"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
+TRANSLATE_SYSTEM = """Ты переводишь надписи на рекламных картинках интернет-магазина на русский язык.
+Тебе дают картинку, где текстовые блоки обведены красными рамками с номерами, и распознанный текст
+блоков (распознавание теряет турецкие буквы и пробелы — сверяйся с картинкой).
+
+Для каждого блока верни id и ru:
+- ru — короткий естественный рекламный перевод на русский, по длине близкий к оригиналу
+  (лучше короче: место на картинке ограничено). Без кавычек и точки в конце заголовков.
+- ru = "" (не трогать), если это надпись на самом товаре или упаковке, название бренда или линейки,
+  цифры и единицы (SPF 50, 80 ml), или элементы сайта/приложения (кнопки, цены, рейтинг, меню).
+- Если текст уже на русском — ru = ""."""
+
+
+async def translate_blocks(image: Image.Image, texts: list[str]) -> list[str | None] | None:
+    """Перевод текстовых блоков картинки. None — перевод не удался (оставляем как есть)."""
+    if not enabled() or not texts:
+        return None
+    import anthropic
+
+    listing = "\n".join(f"{i}: {t}" for i, t in enumerate(texts))
+    client = anthropic.AsyncAnthropic(api_key=config.anthropic_key, timeout=60.0, max_retries=2)
+    kwargs = dict(
+        model=config.claude_model,
+        max_tokens=8000,
+        system=TRANSLATE_SYSTEM,
+        output_config={"effort": "low", "format": {"type": "json_schema", "schema": TRANSLATE_SCHEMA}},
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_b64(image)}},
+                {"type": "text", "text": f"Распознанные блоки:\n{listing}"},
+            ],
+        }],
+    )
+    try:
+        if config.claude_model in _FALLBACK_MODELS:
+            resp = await client.beta.messages.create(
+                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs
+            )
+        else:
+            resp = await client.messages.create(**kwargs)
+    except anthropic.APIError as e:
+        log.warning("Claude: перевод надписей не удался (%s)", type(e).__name__)
+        return None
+    finally:
+        await client.close()
+    if resp.stop_reason == "refusal":
+        return None
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    try:
+        items = json.loads(text)["items"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    out: list[str | None] = [None] * len(texts)
+    for it in items:
+        i, ru = it.get("id"), (it.get("ru") or "").strip()
+        if isinstance(i, int) and 0 <= i < len(texts) and ru:
+            out[i] = ru
+    return out

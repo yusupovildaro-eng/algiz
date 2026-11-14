@@ -19,6 +19,7 @@ class Settings:
     contact: str = config.contact
     currency: str = config.currency
     channel_id: str = config.channel_id
+    translate: bool = True  # переводить надписи на картинках магазина (нужен ИИ)
 
     def save(self) -> None:
         PATH.parent.mkdir(parents=True, exist_ok=True)
