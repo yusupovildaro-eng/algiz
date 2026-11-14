@@ -148,6 +148,11 @@ def _clean_mask(alpha: np.ndarray) -> np.ndarray:
         near = ndimage.binary_dilation(keep, iterations=6)
         alpha = np.where(near, alpha, 0.0)
         alpha = np.where(solid & ~keep, 0.0, alpha)
+    # полупрозрачные «облака» дальше нескольких пикселей от товара (остатки мазка крема, тени) — убираем
+    solid_now = alpha > 0.5
+    if solid_now.any():
+        dist = ndimage.distance_transform_edt(~solid_now)
+        alpha = np.where((alpha < 0.6) & (dist > 4), 0.0, alpha)
     # заполнить дырки внутри товара (блики на белой коже и т.п.)
     filled = ndimage.binary_fill_holes(alpha > 0.5)
     holes = filled & (alpha <= 0.5)
