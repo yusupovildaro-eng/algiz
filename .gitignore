@@ -3,3 +3,7 @@ posted.db
 __pycache__/
 *.pyc
 logs/
+card_bot/.env
+card_bot/data/
+card_out/
+.venv-cardbot/
