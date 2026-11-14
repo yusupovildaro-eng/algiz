@@ -60,7 +60,7 @@ CURRENCIES = [
     (re.compile(r"₽|руб|\bр\.?(?:\s|$)|rub", re.I), "₽"),
     (re.compile(r"сум|sum|so['’`]?m|сўм|uzs", re.I), "сум"),
     (re.compile(r"₸|тенге|тг|kzt", re.I), "₸"),
-    (re.compile(r"₺|лир|try", re.I), "₺"),
+    (re.compile(r"₺|лир|\btry\b|\btl\b|турецк", re.I), "₺"),
     (re.compile(r"£|gbp|фунт", re.I), "£"),
 ]
 OLD_MARK = re.compile(r"было|вместо|старая|без скидки|→|->|=>|до скидки|теперь|стало|скидк", re.I)
@@ -171,7 +171,11 @@ def _split_sizes(s: str) -> list[str]:
     return [p.upper() if re.fullmatch(r"[a-zA-Z]+", p) else p for p in parts]
 
 
-CURRENCY_WORDS = re.compile(r"\$|€|₽|₸|₺|£|usd|eur|rub|uzs|kzt|сум|so['’`]?m|сўм|руб\w*|р\.|тенге|тг|евро|дол\w*", re.I)
+CURRENCY_WORDS = re.compile(
+    r"\$|€|₽|₸|₺|£|usd|eur|rub|uzs|kzt|\btry\b|\btl\b|сум\w*|so['’`]?m|сўм|руб\w*|р\.|тенге|тг|евро|дол\w*|"
+    r"лир\w*|турецк\w*|американск\w*|российск\w*|узбекск\w*|фунт\w*",
+    re.I,
+)
 
 
 def _is_price(seg: str) -> bool:
@@ -226,6 +230,13 @@ def parse_details(text: str, default_currency: str = "сум") -> Details:
             continue
         rest.append(seg)
 
+    if d.price is None:  # цена с непривычной подписью («3590 турецких лир») — берём строку с числом от 100
+        for r in rest[1:]:
+            nums = [_num(n) for n in NUM.findall(r)]
+            if nums and max(nums) >= 100 and len(r) <= 40:
+                d.price, d.currency = max(nums), _currency(r)
+                rest.remove(r)
+                break
     if rest:
         d.title = rest[0]
         for r in rest[1:]:

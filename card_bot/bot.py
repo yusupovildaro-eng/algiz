@@ -345,6 +345,27 @@ async def cmd_translate(m: Message, command: CommandObject) -> None:
     await m.answer(f"Перевод надписей на картинках {state}. Включить/выключить: /translate on | off{extra}")
 
 
+@router.message(Command("repeat"))
+async def cmd_repeat(m: Message, bot: Bot) -> None:
+    """Пересобрать последнюю карточку из сохранённых фото (после перезапуска бота ничего не теряется)."""
+    dirs = sorted(p for p in DEBUG_DIR.glob("*") if p.is_dir() and any(p.glob("in_*.img"))) if DEBUG_DIR.exists() else []
+    if not dirs:
+        await m.answer("Сохранённых карточек пока нет — пришлите фото товара 📸")
+        return
+    last = dirs[-1]
+    d = _new_draft(m.chat.id)
+    files = sorted(last.glob("in_*.img"), key=lambda f: int(f.stem.split("_")[1]))
+    d.photos = [f.read_bytes() for f in files][:MAX_PHOTOS]
+    d.seen = {f"repeat-{i}" for i in range(len(d.photos))}
+    text_file = last / "text.txt"
+    d.text = text_file.read_text(encoding="utf-8") if text_file.exists() else ""
+    d.have_text = True
+    d.debug_dir = last
+    await m.answer(f"🔁 Пересобираю последнюю карточку: фото {len(d.photos)}, текст:\n<pre>{html.escape(d.text or '-')}</pre>")
+    _start_background_processing(d)
+    await _generate(bot, m.chat.id, d)
+
+
 @router.message(Command("new"))
 async def cmd_new(m: Message) -> None:
     _new_draft(m.chat.id)
@@ -851,6 +872,7 @@ async def run() -> None:
     await bot.set_my_commands([
         BotCommand(command="start", description="Как пользоваться"),
         BotCommand(command="new", description="Начать новую карточку"),
+        BotCommand(command="repeat", description="Пересобрать последнюю карточку"),
         BotCommand(command="settings", description="Название магазина, контакт, канал"),
         BotCommand(command="logo", description="Поставить логотип на карточки"),
         BotCommand(command="help", description="Подсказка по формату текста"),
