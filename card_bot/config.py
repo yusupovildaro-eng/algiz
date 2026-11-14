@@ -34,8 +34,10 @@ class Config:
     shop_name: str = field(default_factory=lambda: os.environ.get("SHOP_NAME", "MY SHOP"))
     contact: str = field(default_factory=lambda: os.environ.get("SHOP_CONTACT", ""))
     currency: str = field(default_factory=lambda: os.environ.get("CURRENCY", "сум"))
-    # Модель удаления фона (rembg): birefnet-general-lite — аккуратнее, isnet-general-use — быстрее.
+    # Точная модель удаления фона (rembg) — для сложного фона.
     rembg_model: str = field(default_factory=lambda: os.environ.get("REMBG_MODEL", "birefnet-general-lite"))
+    # Быстрая модель для однотонного фона (скриншоты магазинов): в ~9 раз быстрее. Пусто — всегда точная.
+    rembg_fast_model: str = field(default_factory=lambda: os.environ.get("REMBG_FAST_MODEL", "isnet-general-use"))
     # Необязательно: тексты подписей пишет Claude, если задан ключ.
     anthropic_key: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", ""))
     claude_model: str = field(default_factory=lambda: os.environ.get("CLAUDE_MODEL", "claude-opus-5-5"))

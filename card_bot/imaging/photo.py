@@ -24,7 +24,7 @@ except ImportError:
 
 MAX_SIDE = 2000
 
-_session = None
+_sessions: dict[str, object] = {}
 _session_lock = threading.Lock()
 
 
@@ -45,46 +45,77 @@ class ProductPhoto:
         return self.cutout is not None
 
 
-def load_image(data: bytes) -> Image.Image:
+def load_rgba(data: bytes) -> tuple[Image.Image, np.ndarray | None]:
+    """RGB-картинка + собственная прозрачность файла, если она есть (PNG товара без фона с сайта)."""
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img)
-    if img.mode in ("RGBA", "LA", "P"):
+    alpha = None
+    if img.mode in ("RGBA", "LA", "P", "PA"):
         img = img.convert("RGBA")
+        if max(img.size) > MAX_SIDE:
+            img.thumbnail((MAX_SIDE, MAX_SIDE), Image.LANCZOS)
+        a = np.asarray(img.getchannel("A"), dtype=np.float32) / 255.0
+        if (a < 0.04).mean() > 0.05:  # заметная часть картинки прозрачна — фон уже убран
+            alpha = np.clip((a - 0.35) / 0.4, 0, 1)  # родную полупрозрачную тень убираем, свою нарисуем
         bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
         img = Image.alpha_composite(bg, img)
     img = img.convert("RGB")
     if max(img.size) > MAX_SIDE:
         img.thumbnail((MAX_SIDE, MAX_SIDE), Image.LANCZOS)
-    return img
+    return img, alpha
 
 
-def _get_session():
-    global _session
+def load_image(data: bytes) -> Image.Image:
+    return load_rgba(data)[0]
+
+
+def _get_session(model: str):
     with _session_lock:
-        if _session is None:
+        if model not in _sessions:
+            import onnxruntime as ort
             from rembg import new_session
 
-            log.info("Загружаю модель удаления фона %s (первый раз скачивается ~200 МБ)…", config.rembg_model)
-            _session = new_session(config.rembg_model)
-        return _session
+            log.info("Загружаю модель удаления фона %s (первый раз скачивается ~200 МБ)…", model)
+            opts = ort.SessionOptions()
+            # без «запасника» памяти: иначе BiRefNet разрастается до 8–12 ГБ ОЗУ, а так ~0.7 ГБ
+            opts.enable_cpu_mem_arena = False
+            _sessions[model] = new_session(model, sess_opts=opts)
+        return _sessions[model]
 
 
 def warmup() -> None:
-    """Заранее скачать и загрузить модель, чтобы первое фото обработалось быстро."""
-    try:
-        _get_session()
-    except Exception:  # noqa: BLE001
-        log.exception("Не удалось загрузить модель удаления фона")
+    """Заранее скачать и загрузить модели, чтобы первое фото обработалось быстро."""
+    for model in filter(None, [config.rembg_fast_model, config.rembg_model]):
+        try:
+            _get_session(model)
+        except Exception:  # noqa: BLE001
+            log.exception("Не удалось загрузить модель удаления фона %s", model)
 
 
-def _predict_mask(img: Image.Image) -> np.ndarray:
+def _predict_mask(img: Image.Image, model: str | None = None) -> np.ndarray:
     from rembg import remove
 
-    mask = remove(img, session=_get_session(), only_mask=True)
+    mask = remove(img, session=_get_session(model or config.rembg_model), only_mask=True)
     if not isinstance(mask, Image.Image):
         mask = Image.open(io.BytesIO(mask)) if isinstance(mask, bytes) else Image.fromarray(mask)
     mask = mask.convert("L").resize(img.size, Image.BILINEAR)
     return np.asarray(mask, dtype=np.float32) / 255.0
+
+
+def _background_is_plain(img: Image.Image, mask: np.ndarray) -> bool:
+    """Однотонный фон вокруг товара (страница магазина, студия) — быстрой модели можно верить."""
+    small = img.convert("L").resize((max(1, img.width // 4), max(1, img.height // 4)), Image.BILINEAR)
+    lum = np.asarray(small, dtype=np.float32) / 255.0
+    m = np.asarray(Image.fromarray((mask * 255).astype(np.uint8)).resize(small.size, Image.BILINEAR)) / 255.0
+    from scipy import ndimage
+
+    near = ndimage.binary_dilation(m > 0.5, iterations=6) & (m < 0.05)  # кольцо фона вокруг товара
+    if near.sum() < 50:
+        return False
+    cover = float((mask > 0.5).mean())
+    vals = lum[near]
+    off = float((np.abs(vals - np.median(vals)) > 0.15).mean())  # доля «пёстрых» точек фона
+    return off < 0.15 and 0.02 < cover < 0.9
 
 
 def _clean_mask(alpha: np.ndarray) -> np.ndarray:
@@ -234,14 +265,17 @@ def _analyze(rgb: np.ndarray, alpha: np.ndarray | None):
 
 
 def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
-    img = load_image(data)
+    img, own_alpha = load_rgba(data)
     source = img
     screenshot = False
 
     alpha = None
-    if remove_bg:
+    if remove_bg and own_alpha is not None:
+        alpha = _clean_mask(own_alpha)  # фон уже прозрачный — модель не нужна
+    elif remove_bg:
         try:
-            raw = _predict_mask(img)
+            fast = config.rembg_fast_model
+            raw = _predict_mask(img, fast or config.rembg_model)
             if img.height / img.width > 1.55:  # похоже на скриншот с телефона
                 region = _product_region(raw)
                 if region:
@@ -250,6 +284,10 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                     raw = raw[y0:y1, x0:x1]
                     screenshot = True
                     log.info("Скриншот: товар найден в области %s", region)
+            if fast and fast != config.rembg_model and not _background_is_plain(img, raw):
+                # сложный фон (кровать, ткань, комната) — переделываем точной моделью
+                log.info("Сложный фон — режу точной моделью %s", config.rembg_model)
+                raw = _predict_mask(img, config.rembg_model)
             alpha = _clean_mask(raw)
             cover = float(alpha.mean())
             if cover < 0.015 or cover > 0.985:

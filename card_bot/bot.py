@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import io
 import logging
@@ -42,6 +43,17 @@ router.message.filter(F.chat.type == ChatType.PRIVATE)
 MAX_PHOTOS = 8
 ALBUM_WAIT = 1.6  # сек: ждём, пока Telegram досылает все фото альбома
 HEAVY = asyncio.Semaphore(1)  # обработка фото грузит процессор — по одной задаче за раз
+_urgent = 0  # сколько «срочных» задач ждёт (превью, выбранный стиль) — фоновая обработка им уступает
+
+
+@contextlib.asynccontextmanager
+async def urgent():
+    global _urgent
+    _urgent += 1
+    try:
+        yield
+    finally:
+        _urgent -= 1
 
 EXAMPLE = (
     "<i>Кроссовки Nike Air Force 1\n"
@@ -80,6 +92,10 @@ class Draft:
     album_timer: asyncio.Task | None = None
     work: asyncio.Task | None = None
     warned_limit: bool = False
+    cover: int = 0  # какое фото — обложка
+    seen: set = field(default_factory=set)  # file_unique_id — дубли не берём
+    pending: int = 0  # сколько фото ещё скачивается
+    prompted: bool = False  # уже попросили написать цену
     link_title: str = ""
     link_brand: str = ""
     link_desc: str = ""
@@ -121,24 +137,41 @@ async def _download(bot: Bot, file_id: str) -> bytes:
     return buf.read() if buf else b""
 
 
-async def _ensure_processed(d: Draft, status: Message | None = None) -> list[ProductPhoto]:
-    """Вырезает фон и улучшает фото, которые ещё не обработаны (результат кэшируется)."""
-    todo = [i for i in range(len(d.photos)) if i not in d.processed]
-    async with HEAVY:
-        for n, i in enumerate(todo, 1):
+def _order(d: Draft) -> list[int]:
+    """Сначала обложка, потом остальные фото."""
+    rest = [i for i in range(len(d.photos)) if i != d.cover]
+    return [d.cover] + rest if d.photos else []
+
+
+async def _process(d: Draft, indices: list[int], status: Message | None = None, background: bool = False) -> None:
+    """Вырезает фон и улучшает указанные фото (результат кэшируется).
+
+    Блокировка берётся на каждое фото отдельно, чтобы обложка могла «влезть» между
+    фото, которые обрабатываются в фоне.
+    """
+    todo = [i for i in indices if i not in d.processed]
+    for n, i in enumerate(todo, 1):
+        while background and _urgent:
+            await asyncio.sleep(0.2)
+        async with HEAVY:
+            if i in d.processed:
+                continue
             if status and len(todo) > 1:
                 try:
                     await status.edit_text(f"⏳ Обрабатываю фото {n}/{len(todo)}: убираю фон, выравниваю свет…")
                 except TelegramAPIError:
                     pass
             d.processed[i] = await asyncio.to_thread(process, d.photos[i], True)
-    return [d.processed[i] for i in range(len(d.photos))]
 
 
 def _start_background_processing(d: Draft) -> None:
-    """Начинаем вырезать фон сразу, пока продавец пишет название и цену."""
+    """Начинаем вырезать фон сразу, пока продавец пишет цену и выбирает стиль."""
     if d.work is None or d.work.done():
-        d.work = asyncio.create_task(_ensure_processed(d))
+        d.work = asyncio.create_task(_process(d, _order(d), background=True))
+
+
+def _photos(d: Draft) -> list[ProductPhoto]:
+    return [d.processed[i] for i in _order(d)]
 
 
 def _style_keyboard(d: Draft):
@@ -147,7 +180,11 @@ def _style_keyboard(d: Draft):
     for i, st in enumerate(cards.STYLES, 1):
         kb.button(text=f"{i}. {cards.STYLE_NAMES[st]}" + (" ★" if st == rec else ""), callback_data=f"style:{st}")
     kb.button(text="✂️ Не вырезать фон" if d.use_cutout else "✂️ Вырезать фон", callback_data="cut")
-    kb.adjust(2, 2, 1, 1)
+    rows = [2, 2, 1, 1]
+    if len(d.photos) > 1:
+        kb.button(text=f"🖼 Другая обложка ({d.cover + 1}/{len(d.photos)})", callback_data="cover")
+        rows.append(1)
+    kb.adjust(*rows)
     return kb.as_markup()
 
 
@@ -271,41 +308,64 @@ async def cmd_new(m: Message) -> None:
 
 async def _after_album(bot: Bot, chat_id: int, d: Draft) -> None:
     await asyncio.sleep(ALBUM_WAIT)
+    while d.pending:  # большие файлы ещё скачиваются
+        await asyncio.sleep(0.3)
+    d.photos = [p for p in d.photos if p]
+    if not d.photos:
+        return
     _start_background_processing(d)
     if d.have_text:
         await _generate(bot, chat_id, d)
-    else:
-        await bot.send_message(chat_id, f"📸 Получил фото: {len(d.photos)}. Уже убираю фон.\n\n" + HOW_TO)
+        return
+    d.prompted = True
+    extra = f" (беру первые {MAX_PHOTOS})" if d.warned_limit else ""
+    await bot.send_message(
+        chat_id,
+        f"📸 Фото: {len(d.photos)}{extra}. Уже убираю фон.\n"
+        "Обложкой будет первое фото — потом её можно поменять кнопкой.\n\n"
+        "Теперь напишите <b>цену</b> — и, если нужно, название и размеры, например:\n"
+        "<i>Крем Calliel Glow Primer SPF 50\n450 000</i>\n\n"
+        "Формат подробно: /help",
+    )
 
 
-async def _add_photo(m: Message, bot: Bot, file_id: str) -> None:
+async def _add_photo(m: Message, bot: Bot, file_id: str, unique_id: str) -> None:
     if m.chat.id in awaiting_logo:
         awaiting_logo.discard(m.chat.id)
         await asyncio.to_thread(save_logo, await _download(bot, file_id))
         await m.answer("✅ Логотип сохранён — он будет на всех новых карточках.")
         return
     d = drafts.get(m.chat.id)
-    if d is None or d.rendered or (d.have_text and d.info is not None):
+    if d is not None and d.prompted and not d.rendered and d.info is None and d.photos:
+        # бот уже попросил цену, а пришли новые фото — это новая карточка, старые не смешиваем
         d = _new_draft(m.chat.id)
+        await m.answer("🆕 Начинаю новую карточку с этими фото. "
+                       "Если это фото к прошлому товару — пришлите все фото одним альбомом.")
+    elif d is None or d.rendered or d.info is not None:
+        d = _new_draft(m.chat.id)
+    if unique_id in d.seen:
+        return  # то же фото второй раз
     if len(d.photos) >= MAX_PHOTOS:
-        if not d.warned_limit:
-            d.warned_limit = True
-            await m.answer(f"Беру первые {MAX_PHOTOS} фото — больше в карусель не поместится.")
+        d.warned_limit = True
         return
-    data = await _download(bot, file_id)
-    if not data:
-        return
-    d.photos.append(data)
+    d.seen.add(unique_id)
+    idx = len(d.photos)
+    d.photos.append(b"")  # место занято сразу — альбом приходит пачкой, лимит не «проскочит»
+    d.pending += 1
     if m.caption:
         d.text, d.have_text = m.caption, True
     if d.album_timer and not d.album_timer.done():
         d.album_timer.cancel()
     d.album_timer = asyncio.create_task(_after_album(bot, m.chat.id, d))
+    try:
+        d.photos[idx] = await _download(bot, file_id)
+    finally:
+        d.pending -= 1
 
 
 @router.message(F.photo)
 async def on_photo(m: Message, bot: Bot) -> None:
-    await _add_photo(m, bot, m.photo[-1].file_id)
+    await _add_photo(m, bot, m.photo[-1].file_id, m.photo[-1].file_unique_id)
 
 
 @router.message(F.document)
@@ -317,7 +377,7 @@ async def on_document(m: Message, bot: Bot) -> None:
     if doc.file_size and doc.file_size > 20 * 1024 * 1024:
         await m.answer("Файл больше 20 МБ — Telegram не даст боту его скачать. Пришлите фото поменьше.")
         return
-    await _add_photo(m, bot, doc.file_id)
+    await _add_photo(m, bot, doc.file_id, doc.file_unique_id)
 
 
 # ---------------- текст ----------------
@@ -340,9 +400,7 @@ async def _ask_screenshots(m: Message, d: Draft, status: Message) -> None:
 
 
 async def _from_link(m: Message, bot: Bot, url: str) -> None:
-    d = drafts.get(m.chat.id)
-    if d is None or d.rendered or d.info is not None:
-        d = _new_draft(m.chat.id)
+    d = _new_draft(m.chat.id)  # ссылка — всегда новая карточка
     rest = URL_RE.sub("", m.text or "").strip()
     if rest:
         d.text, d.have_text = rest, True
@@ -357,18 +415,14 @@ async def _from_link(m: Message, bot: Bot, url: str) -> None:
         log.info("На странице %s нет фото товара", url)
         await _ask_screenshots(m, d, status)
         return
-    if d.work and not d.work.done():
-        await d.work
-    shift = len(lp.images)
-    d.processed = {i + shift: v for i, v in d.processed.items()}
-    d.photos = (lp.images + d.photos)[:MAX_PHOTOS]
-    d.processed = {i: v for i, v in d.processed.items() if i < len(d.photos)}
+    d.photos = lp.images[:MAX_PHOTOS]
     d.link_title, d.link_brand, d.link_desc = lp.title, lp.brand, lp.description
     _start_background_processing(d)
     if d.have_text:
         await status.delete()
         await _generate(bot, m.chat.id, d)
         return
+    d.prompted = True
     await status.edit_text(
         f"Нашёл: <b>{html.escape(lp.title or 'товар')}</b>\nФото с сайта: {len(lp.images)}. Уже убираю фон.\n\n"
         "Теперь напишите цену (и размеры, если есть). Название возьму со страницы — "
@@ -394,11 +448,12 @@ async def on_text(m: Message, bot: Bot) -> None:
 
 
 async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
-    status = await bot.send_message(chat_id, "⏳ Обрабатываю фото: убираю фон, выравниваю свет…")
+    status = await bot.send_message(chat_id, "⏳ Обрабатываю обложку: убираю фон, выравниваю свет…")
     try:
-        if d.work and not d.work.done():
-            await d.work
-        photos = await _ensure_processed(d, status)
+        async with urgent():
+            await _process(d, [d.cover])  # для превью нужна только обложка, остальные — в фоне
+        _start_background_processing(d)
+        photos = [d.processed[d.cover]]
     except Exception:  # noqa: BLE001
         log.exception("Ошибка обработки фото")
         await status.edit_text("😔 Не получилось обработать фото. Попробуйте другое фото или /new.")
@@ -449,10 +504,12 @@ async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
 
 
 async def _send_preview(bot: Bot, chat_id: int, d: Draft) -> None:
-    photos = [d.processed[i] for i in range(len(d.photos))]
     rec = cards.recommend_style(d.info)
-    async with HEAVY:
-        img = await asyncio.to_thread(cards.render_preview, photos[0], d.info, d.use_cutout, rec)
+    async with urgent():
+        await _process(d, [d.cover])
+        photos = [d.processed[d.cover]]
+        async with HEAVY:
+            img = await asyncio.to_thread(cards.render_preview, photos[0], d.info, d.use_cutout, rec)
     note = ""
     if d.use_cutout and photos[0].cutout is None:
         note = "\n\nФон на обложке не отделился — фото стоит аккуратной карточкой. Лучше всего вырезается вещь на однотонном фоне."
@@ -485,9 +542,17 @@ async def cb_style(cb: CallbackQuery, bot: Bot) -> None:
         return
     await cb.answer(f"Собираю «{cards.STYLE_NAMES[style]}»…")
     chat_id = cb.message.chat.id
-    photos = [d.processed[i] for i in range(len(d.photos))]
-    async with HEAVY:
-        res = await asyncio.to_thread(cards.render_set, style, photos, d.info, d.use_cutout)
+    async with urgent():
+        if any(i not in d.processed for i in range(len(d.photos))):
+            status = await bot.send_message(chat_id, "⏳ Дообрабатываю остальные фото…")
+            await _process(d, _order(d), status)
+            try:
+                await status.delete()
+            except TelegramAPIError:
+                pass
+        photos = _photos(d)
+        async with HEAVY:
+            res = await asyncio.to_thread(cards.render_set, style, photos, d.info, d.use_cutout)
     d.style = style
     d.slides = [_jpeg(im) for im in res["slides"]]
     d.story = _jpeg(res["story"])
@@ -514,6 +579,17 @@ async def cb_cut(cb: CallbackQuery, bot: Bot) -> None:
         return
     d.use_cutout = not d.use_cutout
     await cb.answer("Фон вырезаю" if d.use_cutout else "Оставляю родной фон фото")
+    await _send_preview(bot, cb.message.chat.id, d)
+
+
+@router.callback_query(F.data == "cover")
+async def cb_cover(cb: CallbackQuery, bot: Bot) -> None:
+    d = _draft_or_none(cb)
+    if not d:
+        await cb.answer("Черновик устарел — пришлите фото заново", show_alert=True)
+        return
+    d.cover = (d.cover + 1) % len(d.photos)
+    await cb.answer(f"Обложка — фото {d.cover + 1}")
     await _send_preview(bot, cb.message.chat.id, d)
 
 
@@ -628,6 +704,6 @@ async def run() -> None:
     ])
     asyncio.get_running_loop().run_in_executor(None, warmup)  # модель фона грузится в фоне
     me = await bot.get_me()
-    log.info("Бот @%s запущен. Модель фона: %s. Claude: %s", me.username, config.rembg_model,
+    log.info("Бот @%s запущен. Модели фона: %s + %s. Claude: %s", me.username, config.rembg_fast_model, config.rembg_model,
              "вкл" if ai.enabled() else "выкл")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
