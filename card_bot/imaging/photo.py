@@ -40,6 +40,11 @@ class ProductPhoto:
     palette: list = None  # type: ignore[assignment]  # [(RGB, доля)] — цвета товара для подбора фона
     from_screenshot: bool = False
     unusable: bool = False  # скриншот без товара — в карусель не берём
+    detail: float = 0.0  # «детальность» вырезанного: надписи и грани товара (у мазка крема или фона ≈ 0)
+
+    @property
+    def good_cover(self) -> bool:
+        return (not self.unusable and self.cutout is not None and not self.cropped and self.detail >= 0.04)
 
     @property
     def has_cutout(self) -> bool:
@@ -306,7 +311,10 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                 region = _product_region(raw)
                 if region:
                     x0, y0, x1, y1 = region
-                    band = source.crop((0, y0, source.width, y1))
+                    extra = int(0.05 * source.height)  # подписи инфографики над/под картинкой
+                    band = source.crop((0, max(int(0.08 * source.height), y0 - extra), source.width,
+                                        min(int(0.86 * source.height), y1 + extra)))
+                    edge_l, edge_r = x0 <= 1, x1 >= source.width - 1
                     img = img.crop(region)
                     raw = raw[y0:y1, x0:x1]
                     screenshot = True
@@ -314,7 +322,9 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                 elif img.height / img.width > 1.95:  # пропорции экрана телефона, а товара не видно
                     unusable = True
                     log.info("Скриншот без товара — пропускаю")
-            if fast and fast != config.rembg_model:
+            if unusable:
+                raw = None  # товара нет — точная модель не нужна
+            elif fast and fast != config.rembg_model:
                 if not _background_is_plain(img, raw):
                     # сложный фон (кровать, ткань, комната) — переделываем точной моделью
                     log.info("Сложный фон — режу точной моделью %s", config.rembg_model)
@@ -323,22 +333,30 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
                     # быстрая модель «не уверена» (белое на белом, пастель) — переделываем точной
                     log.info("Быстрая модель не уверена (%.2f) — режу точной", _unsure(raw))
                     raw = _predict_mask(img, config.rembg_model)
-            if _unsure(raw) > 0.15:
+            if raw is not None and _unsure(raw) > 0.15:
                 log.info("Маска ненадёжная (%.2f) — фото без вырезания", _unsure(raw))
                 raw = None
             alpha = _clean_mask(raw) if raw is not None else np.zeros((img.height, img.width), np.float32)
             cover = float(alpha.mean())
-            if cover < 0.015 or cover > 0.985:
+            if unusable:
+                alpha = None
+            elif cover < 0.015 or cover > 0.985:
                 log.info("Фон не отделился (покрытие %.3f) — оставляю фото как есть", cover)
                 alpha = None
         except Exception:  # noqa: BLE001
             log.exception("Ошибка удаления фона — оставляю фото как есть")
             alpha = None
 
-    enhanced = _enhance(img, alpha)
+    # фото магазина уже отретушированы: цвет не трогаем (иначе белое уходит в мятный и т.п.)
+    enhanced = img if (screenshot or own_alpha is not None) else _enhance(img, alpha)
 
     cutout = None
     cropped = alpha is not None and not screenshot and _touches_frame(alpha)
+    if alpha is not None and screenshot:
+        # товар упирается в край картинки магазина (обрезан) — вырезанным он будет выглядеть «порубленным»
+        side = max(float((alpha[:, 0] > 0.5).mean()) if edge_l else 0.0,
+                   float((alpha[:, -1] > 0.5).mean()) if edge_r else 0.0)
+        cropped = side > 0.08
     if alpha is not None:
         e = np.asarray(enhanced, dtype=np.float32) / 255.0
         e = _defringe(e, alpha)
@@ -348,10 +366,16 @@ def process(data: bytes, remove_bg: bool = True) -> ProductPhoto:
         bbox = a.point(lambda v: 255 if v > 8 else 0).getbbox()
         if bbox:
             cutout = rgba.crop(bbox)
+    detail = 0.0
+    if cutout is not None:
+        ca = np.asarray(cutout.getchannel("A"), dtype=np.float32) / 255
+        edges = np.asarray(cutout.convert("L").filter(ImageFilter.FIND_EDGES), dtype=np.float32) / 255
+        inner = ca > 0.95
+        detail = float((edges[inner] > 0.15).mean()) if inner.sum() > 100 else 0.0
 
     final_rgb = np.asarray(enhanced, dtype=np.float32) / 255.0
     color, lum, sat, palette = _analyze(final_rgb, alpha)
     shown = band if band is not None else enhanced  # фото магазина уже отретушировано — не трогаем цвет
     return ProductPhoto(image=shown, cutout=cutout, color=color, luminance=lum, saturation=sat, cropped=cropped,
                         palette=palette,
-                        source=source, from_screenshot=screenshot, unusable=unusable)
+                        source=source, from_screenshot=screenshot, unusable=unusable, detail=detail)

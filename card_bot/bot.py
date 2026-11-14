@@ -28,12 +28,14 @@ from aiogram.types import (
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from PIL import Image, ImageDraw
 
 from . import ai, describe
 from .config import DATA_DIR, config
 from .imaging import cards
 from .imaging.logo import load_logo, remove_logo, save_logo
-from .imaging.photo import ProductPhoto, process, warmup
+from .imaging.fonts import font
+from .imaging.photo import ProductPhoto, load_image, process, warmup
 from .storage import settings
 from .links import URL_RE, fetch_product, find_url
 from .text import Details, build_caption, guess_category, parse_details, to_card_info
@@ -209,7 +211,7 @@ def _style_keyboard(d: Draft):
     kb.button(text="✂️ Не вырезать фон" if d.use_cutout else "✂️ Вырезать фон", callback_data="cut")
     rows = [2, 2, 1, 1]
     if len(d.photos) > 1:
-        kb.button(text=f"🖼 Другая обложка ({d.cover + 1}/{len(d.photos)})", callback_data="cover")
+        kb.button(text=f"🖼 Выбрать обложку (сейчас фото {d.cover + 1})", callback_data="covers")
         rows.append(1)
     kb.adjust(*rows)
     return kb.as_markup()
@@ -483,6 +485,17 @@ async def _generate(bot: Bot, chat_id: int, d: Draft) -> None:
     try:
         async with urgent():
             await _process(d, [d.cover])  # для превью нужна только обложка, остальные — в фоне
+            if not d.processed[d.cover].good_cover and len(d.photos) > 1:
+                # первое фото — обрезанный товар, текстура или страница с текстом: ищем фото получше
+                try:
+                    await status.edit_text("🔎 Подбираю для обложки фото получше…")
+                except TelegramAPIError:
+                    pass
+                for i in _order(d)[1:]:
+                    await _process(d, [i])
+                    if d.processed[i].good_cover:
+                        d.cover = i
+                        break
         _start_background_processing(d)
     except Exception:  # noqa: BLE001
         log.exception("Ошибка обработки фото")
@@ -626,14 +639,62 @@ async def cb_cut(cb: CallbackQuery, bot: Bot) -> None:
     await _send_preview(bot, cb.message.chat.id, d)
 
 
-@router.callback_query(F.data == "cover")
+def _contact_sheet(d: Draft) -> bytes:
+    """Все присланные фото с номерами — чтобы выбрать обложку."""
+    th = 420
+    tiles = []
+    for raw in d.photos:
+        im = load_image(raw)
+        im.thumbnail((th * 2, th))
+        tiles.append(im)
+    cols = min(4, len(tiles))
+    rows = (len(tiles) + cols - 1) // cols
+    cw = max(t.width for t in tiles)
+    sheet = Image.new("RGB", (cols * (cw + 12) + 12, rows * (th + 12) + 12), (255, 255, 255))
+    draw = ImageDraw.Draw(sheet)
+    f = font("sans", 44, 800)
+    for i, t in enumerate(tiles):
+        x = 12 + (i % cols) * (cw + 12) + (cw - t.width) // 2
+        y = 12 + (i // cols) * (th + 12)
+        sheet.paste(t, (x, y))
+        draw.ellipse((x + 10, y + 10, x + 76, y + 76), fill=(17, 17, 17))
+        draw.text((x + 43, y + 43), str(i + 1), font=f, fill=(255, 255, 255), anchor="mm")
+        if i == d.cover:
+            draw.rectangle((x - 4, y - 4, x + t.width + 3, y + t.height + 3), outline=(255, 176, 0), width=6)
+    return _jpeg(sheet, 88)
+
+
+@router.callback_query(F.data == "covers")
+async def cb_covers(cb: CallbackQuery) -> None:
+    d = _draft_or_none(cb)
+    if not d:
+        await cb.answer("Черновик устарел — пришлите фото заново", show_alert=True)
+        return
+    await cb.answer()
+    kb = InlineKeyboardBuilder()
+    for i in range(len(d.photos)):
+        kb.button(text=f"{i + 1}" + (" ✓" if i == d.cover else ""), callback_data=f"cover:{i}")
+    kb.adjust(4)
+    await cb.message.answer_photo(BufferedInputFile(await asyncio.to_thread(_contact_sheet, d), "photos.jpg"),
+                                  caption="Какое фото поставить на обложку?", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("cover:"))
 async def cb_cover(cb: CallbackQuery, bot: Bot) -> None:
     d = _draft_or_none(cb)
     if not d:
         await cb.answer("Черновик устарел — пришлите фото заново", show_alert=True)
         return
-    d.cover = (d.cover + 1) % len(d.photos)
-    await cb.answer(f"Обложка — фото {d.cover + 1}")
+    try:
+        i = int(cb.data.split(":", 1)[1])
+    except ValueError:
+        await cb.answer()
+        return
+    if not 0 <= i < len(d.photos):
+        await cb.answer()
+        return
+    d.cover = i
+    await cb.answer(f"Обложка — фото {i + 1}")
     await _send_preview(bot, cb.message.chat.id, d)
 
 
