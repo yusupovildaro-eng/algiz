@@ -6,10 +6,13 @@ import asyncio
 import html
 import io
 import logging
+import os
+import ssl
 from dataclasses import dataclass, field
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -591,7 +594,11 @@ async def cb_publish(cb: CallbackQuery, bot: Bot) -> None:
 async def run() -> None:
     if not config.bot_token:
         raise SystemExit("Не задан CARD_BOT_TOKEN — получите токен у @BotFather и впишите в card_bot/.env")
-    bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    session = AiohttpSession()
+    ca_file = os.environ.get("SSL_CERT_FILE")
+    if ca_file and os.path.exists(ca_file):  # корпоративный прокси со своим сертификатом
+        session._connector_init["ssl"] = ssl.create_default_context(cafile=ca_file)
+    bot = Bot(config.bot_token, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.message.outer_middleware(access_middleware)
     dp.callback_query.outer_middleware(access_middleware)
